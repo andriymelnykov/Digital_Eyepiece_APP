@@ -10,6 +10,7 @@ See video, how it works in real time:
 https://youtu.be/P-4FeEkd-uA
 
 See discussions on cloudynight:
+
 https://www.cloudynights.com/topic/934172-my-dream-eaa-setup-with-digital-binocular-eyepiece/
 https://www.cloudynights.com/topic/912512-digital-astronomy-eyepiece-app-sw-for-ultra-fast-eaa/
 
