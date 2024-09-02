@@ -6,6 +6,7 @@ This app can also output images on a second display, used as electronic eyepiece
 Please read Readme file in release folder.
 
 See video, how it works in real time:
+
 https://youtu.be/P-4FeEkd-uA
 
 See discussions on cloudynight:
