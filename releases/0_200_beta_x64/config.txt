@@ -1,0 +1,73 @@
+0 // debug output, screen and log file: 0 - none, 1 - active
+//--------------- Camera and preprocessing Parameters for video mode
+400 //exposure time for video mode, ms
+500 //gain for video mode
+50 //White balance Red for video mode
+50 //White balance Blue for video mode
+100 //offset for video mode
+0 //high speed mode for video mode, 0 - not active, 1 - active
+1 //use dark frame for hot pixel correction, for video mode, 0 - don't use, 1 - use
+0 //subtract dark frame from light frame, for video mode, 0 - don't use, 1 - use
+0 //use flat frame for video mode, 0 - don't use, 1 - use
+1  //banding filter, 0 - disabled, 1 - rows, 2 - columns
+100  // banding filter window size, 3..200
+1.2  // banding filter threshold, 1.0 .. 2.0
+//--------------- Camera and preprocessing Parameters for foto mode
+4000 //exposure time for foto mode, ms
+400 //gain for foto mode
+50 //White balance Red for foto mode
+50 //White balance Blue for foto mode
+100 //offset for foto mode
+1 //use dark frame for hot pixel correction, for foto mode, 0 - don't use, 1 - use
+0 //subtract dark frame from light frame, for foto mode, 0 - don't use, 1 - use
+1 //use flat frame for foto mode, 0 - don't use, 1 - use
+//--------------- Calibration files
+533_dark_400ms_g500_off100_25C.fits //dark for video mode
+533_dark_4s_g400_off100_25C.fits //dark for foto mode
+MasterFlat_hyperstar_bin2.fits   //flat for both video and foto mode
+//--------------- Parameters for both video and foto mode
+0 //monobin for both video and foto mode - only 0 supported for now!
+2 //bin for both video and foto mode, 1, 2, ..
+2 //bytes per pixel, 1 for RAW8, 2 for RAW16 - only RAW16 supported for now!
+90 //bandwidth
+//--------------- Other parameters
+10 //cooler target temperature, °C
+0 //cooler activation, 0 for cooler off, 1 for cooler on
+800  //display size, display window height in pixels
+0  //image flip horizontally: 0 - none, 1 - flip
+2 //image rotation for display: 0, 1, 2, 3 (0, 90°, 180°, 270° clockwise)
+2 //background subtraction: 0 - none, 1 - constant level, 2 - gradient
+0.1 //normalised histogram level from left, for background subtraction
+1  //circular mask as area for background subtraction (for small image circle): 0 - none, 1 - active
+0.9 //circular mask for background subtraction diameter, parts of image height
+0  //show circular mask for background subtraction for test: 0 - none, 1 - active
+1 //noise reduction, for both video and foto mode: 0 - none, 1 - bilateral filtering
+0.3 0.0  //noise reduction strength for video and foto mode, 0..1
+1 //circular mask for display (optic like): 0 - none, 1 - active for both video and foto mode
+50.0 //initial stretching factor: 1.0 is neutral, higher value is more stretching
+1.0 1.0 1.0  // White balance correction for RGB palette
+0  // use color correction matrix for RGB palette, 0 - don't use, 1 - use
+ 1.387698   -0.37278958 -0.07946052   // R = a*R + b*G + c*B, RGB palette
+-0.40483978  1.69918117 -0.27936073   // G = a*R + b*G + c*B
+ 0.05144559 -0.74390103  1.66072276   // B = a*R + b*G + c*B
+1.0 0.0 0.0   // R = a*R + b*G + c*B, dualband palette
+0.8 0.1 0.1   // G = a*R + b*G + c*B
+0.0 0.8 0.4   // B = a*R + b*G + c*B
+0  // enhance bright stars, 0 - disabled, 1 - star "blobs"
+20 0.05  // enhance bright stars: star "blob" radius in pixels, star "blob" strength 0..1
+1  // highlight protection: 0 - disabled, 1 - active
+4.0  // zoom value for focusing mode
+1.0  // zoom value for display, if needed, 1..x
+x m + - p s f h  // control keys for eXit, Mode, stretch +, stretch -, Palette, Save, Focusing, show Histogram
+1  // screen GUI: 0 - none, 1 - active
+//--------------- AI noise reduction
+1   // AI noise reduction activation, 0 - none, 1 - active
+2   // activate AI noise reduction after n-th stacked frame
+train_03.jason   // AI noise reduction model file
+//--------------- Eyepiece display
+0  //Eyepiece display activation, 0 for disabled, 1 for single picture, 2 for stereo
+2560 1440  //Eyepiece display resolution in pixel, bigger dimension, smaller dimension
+121 68  //Eyepiece display dimensions in mm, bigger dimension, smaller dimension
+61  //interpupillary distance in mm
+3 //image rotation for eyepiece display: 0 (same, as main screen), 1, 2, 3 (0, 90°, 180°, 270° clockwise)
+2500 500  //coordinates of a point on second display to move image window (opencv specific)
