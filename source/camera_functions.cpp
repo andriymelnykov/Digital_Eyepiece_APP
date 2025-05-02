@@ -1,4 +1,4 @@
-// Copyright 2024, Andriy Melnykov
+// Copyright 2025, Andriy Melnykov
 // https://github.com/andriymelnykov/Digital_Eyepiece_APP
 // Distributed under the MIT License.
 // (See accompanying LICENSE file or at
@@ -96,13 +96,22 @@ void get_camera_properties()
     //----------- image size calcultion for v and f mode
     if (monobin == 0) monobin_k = 1;
     else if (monobin == 1) monobin_k = 2;
+    if (ROI_zoom == 0) ROI_zoom_k = 1;
+    else if (ROI_zoom == 1) ROI_zoom_k = 2;
 
     // Calculate image size (see bin!!!)
-    image_size = asi_camera_info[cam]->MaxWidth * asi_camera_info[cam]->MaxHeight / bin / bin / monobin_k / monobin_k;
-    image_size *= image_bytes;
+    //image_size = asi_camera_info[cam]->MaxWidth * asi_camera_info[cam]->MaxHeight / bin / bin / monobin_k / monobin_k / ROI_zoom_k / ROI_zoom_k;
+    //image_size *= image_bytes;
  
-    camera_image_width = asi_camera_info[cam]->MaxWidth / bin / monobin_k;
-    camera_image_height = asi_camera_info[cam]->MaxHeight / bin / monobin_k;
+    camera_image_width = asi_camera_info[cam]->MaxWidth / bin / monobin_k / ROI_zoom_k;
+    camera_image_height = asi_camera_info[cam]->MaxHeight / bin / monobin_k / ROI_zoom_k;
+    if (ROI_zoom != 0) {
+        camera_image_width = camera_image_width / 8 * 8;
+        camera_image_height = camera_image_height / 2 * 2;
+    }
+
+    image_size = camera_image_width * camera_image_height;
+    image_size *= image_bytes;
 
     if (debug_flag == 1) {
         cout << "Calculated image size: " << image_size << " bytes" << endl;
@@ -220,12 +229,24 @@ void set_camera_controls()
         //image_bytes = image_bytes_f;
     }
 
-    if (monobin == 0) monobin_k = 1;
-    else if (monobin == 1) monobin_k = 2;
+    //if (monobin == 0) monobin_k = 1;
+    //else if (monobin == 1) monobin_k = 2;
+    //if (ROI_zoom == 0) ROI_zoom_k = 1;
+    //else if (ROI_zoom == 1) ROI_zoom_k = 2;
 
     // Calculate image size (see bin!!!)
-    image_size = asi_camera_info[cam]->MaxWidth * asi_camera_info[cam]->MaxHeight / bin / bin / monobin_k / monobin_k;   
-    image_size *= image_bytes;
+    //image_size = asi_camera_info[cam]->MaxWidth * asi_camera_info[cam]->MaxHeight / bin / bin / monobin_k / monobin_k;   
+    //image_size *= image_bytes;
+
+    //camera_image_width = asi_camera_info[cam]->MaxWidth / bin / monobin_k / ROI_zoom_k;
+    //camera_image_height = asi_camera_info[cam]->MaxHeight / bin / monobin_k / ROI_zoom_k;
+    //if (ROI_zoom != 0) {
+    //    camera_image_width = camera_image_width / 8 * 8;
+    //    camera_image_height = camera_image_height / 2 * 2;
+    //}
+
+    //image_size = camera_image_width * camera_image_height;
+    //image_size *= image_bytes;
 
     //printf("Image size: %d bytes\n", image_size);
     asi_image = (unsigned char*)malloc(sizeof(unsigned char) * image_size);
@@ -239,9 +260,13 @@ void set_camera_controls()
         cout << "Set image type" << endl;
         logfile << "Set image type" << endl;
         if (image_bytes == 1)
-            ASISetROIFormat(asi_camera_info[cam]->CameraID, asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, bin, ASI_IMG_RAW8);
+            //ASISetROIFormat(asi_camera_info[cam]->CameraID, asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, bin, ASI_IMG_RAW8);
+            ASISetROIFormat(asi_camera_info[cam]->CameraID, camera_image_width, camera_image_height, bin, ASI_IMG_RAW8);
+            //here ASISetStartPos should be used for ROI zoom
         else if (image_bytes == 2)
-            ASISetROIFormat(asi_camera_info[cam]->CameraID, asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, bin, ASI_IMG_RAW16);
+            //ASISetROIFormat(asi_camera_info[cam]->CameraID, asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, bin, ASI_IMG_RAW16);
+            ASISetROIFormat(asi_camera_info[cam]->CameraID, camera_image_width, camera_image_height, bin, ASI_IMG_RAW16);
+            //here ASISetStartPos should be used for ROI zoom
         else
         {
             cout << "byte per pixel value wrong" << endl;
@@ -575,6 +600,9 @@ void get_config(char* filename)
 
     debug_flag = 0;
 
+    auto_save_pictures = 0;
+    auto_save_pictures_n = 1;
+
     //-------------------Default Video Parameters
     exposure_time_v = 200000; // us
     gain_v = 600;
@@ -597,6 +625,7 @@ void get_config(char* filename)
     WB_B_f = 50;
     offset_f = 100;
     dark_f_hotpixel_flag = 0;
+    add_hotpixel_flag_f = 0;
     dark_f_subtract_flag = 0;
     flat_f_flag = 0;
 
@@ -612,6 +641,7 @@ void get_config(char* filename)
     image_bytes = 2;  // 1 for RAW8, 2 for RAW16
     bandwidth = 100;
     flat_inv_factor = 0.0;
+    ROI_zoom = 0;
 
     //-------------------Other Parameters
     target_temperature = 10;
@@ -623,7 +653,9 @@ void get_config(char* filename)
     image_rotation = 0;
 
     background_comp_flag = 2;
-    black_level_value = 0.1;
+    black_level_value_v = 0.1;
+    black_level_value_f = 0.1;
+
 
     circular_mask_background_flag = 1;
     circular_mask_background_size = 1.0;
@@ -632,8 +664,17 @@ void get_config(char* filename)
     noise_reduction_flag = 0;
     filter_strength_1 = 0.3;
     filter_strength_2 = 0.2;
+
+    CLAHE_tiles_size = 8;
+    CLAHE_clip_limit = 2.0;
+    CLAHE_amount = 0.0;
+
+    sharpen_sigma = 2.0;
+    sharpen_amount = 0.5;
+
     circular_mask_flag = 1;
     init_gamma = 15.0;
+    star_protection_factor = 1.0;
 
     WBcorr_R = 1.0;   // WB correction for RGB palette
     WBcorr_G = 1.0;
@@ -651,6 +692,7 @@ void get_config(char* filename)
     focusing_zoom_value = 4.0;
 
     display_zoom_value = 1.0;
+    display_zoom_value_stored = 1.0;
 
     key_exit = (int)'x';   // exit
     key_mode = (int)'m';   //mode change foto, video
@@ -665,11 +707,13 @@ void get_config(char* filename)
 
     //--------------- AI noise reduction
 
-    AI_noise_flag = 0;
+    AI_noise_factor = 0;
     
     AI_noise_frames = 1;
     
     //AI_noise_model_filename = "train.jason";
+
+    AI_num_threads = 0;
 
     //-------------------Eyepiece display
 
@@ -688,6 +732,7 @@ void get_config(char* filename)
     second_display_X = 2500;
     second_display_Y = 500;
 
+    circular_mask_eyepiece_flag = 1;
 
 
 
@@ -711,6 +756,13 @@ void get_config(char* filename)
         //cout << "line: " << line;
         iss << line;
         iss >> debug_flag;
+        iss.str("");
+
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> auto_save_pictures >> auto_save_pictures_n;
         iss.str("");
 
 
@@ -838,6 +890,12 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
+        iss >> add_hotpixel_flag_f;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
         iss >> dark_f_subtract_flag;
         iss.str("");
 
@@ -907,6 +965,14 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
+        iss >> ROI_zoom;
+        iss.str("");
+        /**/
+
+        /*
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
         iss >> flat_inv_factor;
         iss.str("");
         /**/
@@ -955,7 +1021,7 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
-        iss >> black_level_value;
+        iss >> black_level_value_v >> black_level_value_f;
         iss.str("");
 
         getline(myfile, line);
@@ -991,6 +1057,18 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
+        iss >> CLAHE_tiles_size >> CLAHE_clip_limit >> CLAHE_amount;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> sharpen_sigma >> sharpen_amount;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
         iss >> circular_mask_flag;
         iss.str("");
 
@@ -998,6 +1076,12 @@ void get_config(char* filename)
         //cout << "line: " << line;
         iss << line;
         iss >> init_gamma;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> star_protection_factor;
         iss.str("");
 
         getline(myfile, line);
@@ -1077,6 +1161,7 @@ void get_config(char* filename)
         iss << line;
         iss >> display_zoom_value;
         iss.str("");
+        display_zoom_value_stored = display_zoom_value;
 
         char c1, c2, c3, c4, c5, c6, c7, c8;
         getline(myfile, line);
@@ -1099,13 +1184,15 @@ void get_config(char* filename)
         iss >> GUI_flag;
         iss.str("");
 
+
+
         getline(myfile, line); //dummy line //AI noise reduction
         iss.str("");
 
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
-        iss >> AI_noise_flag;
+        iss >> AI_noise_factor;
         iss.str("");
 
         getline(myfile, line);
@@ -1119,6 +1206,14 @@ void get_config(char* filename)
         iss << line;
         iss >> AI_noise_model_filename;
         iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> AI_num_threads;
+        iss.str("");
+
+
 
         getline(myfile, line); //dummy line //Eyepiece display
         iss.str("");
@@ -1158,6 +1253,13 @@ void get_config(char* filename)
         iss << line;
         iss >> second_display_X >> second_display_Y;
         iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> circular_mask_eyepiece_flag;
+        iss.str("");
+
 
 
 

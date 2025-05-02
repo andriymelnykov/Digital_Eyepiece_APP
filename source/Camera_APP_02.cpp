@@ -1,4 +1,4 @@
-// Copyright 2024, Andriy Melnykov
+// Copyright 2025, Andriy Melnykov
 // https://github.com/andriymelnykov/Digital_Eyepiece_APP
 // Distributed under the MIT License.
 // (See accompanying LICENSE file or at
@@ -20,7 +20,9 @@
 
 //#include <vector>
 #include <thread>
-
+#include <mutex>
+#include <atomic>
+#include <chrono>
 
 #include <fitsio.h>
 
@@ -65,11 +67,14 @@ using namespace reg;
 
 long image_size; // , image_size_v, image_size_f;
 
-#define exposure_threshold 100000   //50000 //in µs, threshold for video mode switching
+#define exposure_threshold 500  //100000   //50000 //in µs, threshold for video mode switching
 
 ofstream logfile, picfile;    //logfile with debug information, picfile with saved picture information
 
 int debug_flag;
+
+int auto_save_pictures;
+int auto_save_pictures_n;
 
 double t_cycle_old;   // for cycle time measurement and fps
 double t_cycle;
@@ -82,6 +87,7 @@ long WB_B, WB_B_v, WB_B_f;
 long offset, offset_v, offset_f;
 int highspeed_v;
 long bandwidth; // , bandwidth_v, bandwidth_f;
+int ROI_zoom;
 long monobin; // , monobin_v, monobin_f;
 int banding_filter_flag;
 int banding_filter_strength;
@@ -93,6 +99,7 @@ int image_flip;
 int image_rotation;
 int dark_v_hotpixel_flag, dark_v_subtract_flag;
 int dark_f_hotpixel_flag, dark_f_subtract_flag;
+int add_hotpixel_flag_f;
 int flat_v_flag, flat_f_flag;
 char dark_v_filename[80] = "dark_v.fits";
 char dark_f_filename[80] = "dark_f.fits";
@@ -103,7 +110,13 @@ int display_height;
 int background_comp_flag, noise_reduction_flag;
 float filter_strength_1;
 float filter_strength_2;
-float black_level_value;
+int CLAHE_tiles_size;
+float CLAHE_clip_limit;
+float CLAHE_amount;
+float sharpen_sigma;
+float sharpen_amount;
+float black_level_value_v;
+float black_level_value_f;
 int circular_mask_background_flag;
 float circular_mask_background_size;
 int circular_mask_background_show;
@@ -113,6 +126,7 @@ int star_blob_radius;
 float star_blob_strength;
 int highlight_protection_flag;
 float init_gamma;
+float star_protection_factor;
 float WBcorr_R, WBcorr_G, WBcorr_B;
 
 int color_correction_flag;
@@ -124,13 +138,14 @@ float aR, bR, cR;  //dual band colors for R
 float aG, bG, cG;  //dual band colors for G
 float aB, bB, cB;  //dual band colors for B
 double focusing_zoom_value;
-double display_zoom_value;
+double display_zoom_value, display_zoom_value_stored;
 
 int GUI_flag;
 
-int AI_noise_flag;
+float AI_noise_factor;
 int AI_noise_frames;
 char AI_noise_model_filename[80];
+int AI_num_threads;
 
 int eyepiece_display_flag;
 int eyepiece_display_X_pixels;
@@ -141,6 +156,7 @@ float interpupillary_distance_mm;
 int eyepiece_display_rotation;
 int second_display_X;
 int second_display_Y;
+int circular_mask_eyepiece_flag;
 
 
 int focusing_flag;
@@ -160,11 +176,13 @@ unsigned char* dark_f_image;
 
 Mat dark_v_32sc1;
 Mat dark_f_32sc1;
-int num_hotpixel_v, num_hotpixel_f;
+int num_hotpixel_v, num_hotpixel_f, num_hotpixel_add;
 int* hotpixel_list_v;  //list of hot pixels with coordinates and neighbors for interpolation
 int* hotpixel_list_f;  //list of hot pixels with coordinates and neighbors for interpolation
+int* hotpixel_list_add; //additional list of hot pixels found in frame, with coordinates and neighbors for interpolation
 int32_t hotpixel_threshold = 5000;
 double dark_v_mean = 0, dark_f_mean = 0;
+double dark_v_stdev = 200, dark_f_stdev = 200;
 
 unsigned char* flat_image;
 Mat flat_32fc3;
@@ -173,10 +191,12 @@ Mat flat_inv_32fc3;
 int cam;
 int key;
 int monobin_k; // , monobin_k_v, monobin_k_f;
+int ROI_zoom_k;
 
 int state;
 int old_state;
 int frames_stacked; // number of stacked frames in foto mode
+int saved_at_frames_stacked;  // flag: images was already automatically saved at this frame counter
 int color_palette;
 int new_picture = 0;
 int hist_show_state = 0;
@@ -194,10 +214,12 @@ float LUT_dark_max_y;
 
 Mat RAW_image;    // direct from camera, copy for histogram plot
 Mat final_image;  // final image before resize, with all processing
-Mat stack_image;   // only stack with darks/flats, before further processing
+Mat dark_image;    // as final_image, but less stretch, for highlight protection
+Mat stack_image_acq;   // only stack with darks/flats, before further processing, used in acquisition thread
+Mat stack_image_gui;  // image, copied from acquisition thread to gui thread
 //Mat stars_image;  // working image for bright star "blobs"
-Mat sum_image;   // sum image for stacking
-Mat first_image;
+Mat sum_image_acq;   // sum image for stacking, used in acquisition thread
+Mat first_image_acq; // first image in for stacking, used in acquisition thread
 Mat display_image;  // resized image for display
 Ptr<Map> mapPtr; //current affine map, used for image registration
 Ptr<Map> mapPtr_old; //previos affine map, used as initial estimation for next image registration
@@ -228,11 +250,23 @@ int key_histogram;   //(int)'h'   //show histogram
 
 
 
+// Global shared frames and synchronization primitives
+Mat shared_stack_image;
+Mat shared_RAW_image;
+mutex stack_image_mutex;
+mutex RAW_image_mutex;
+atomic<bool> new_frame_available(false);
+atomic<bool> capture_running(true);
+atomic<bool> mode_change(false);
+
+
+
 
 //---------------- GUI
 struct Button {
     cv::Rect rect;
-    std::string text;
+    std::string text1;
+    std::string text2;
     bool pressed;
 };
 
@@ -247,9 +281,16 @@ void drawButton(cv::Mat& img, const Button& button) {
     int baseline = 0;
     //cout << button.rect.width << endl;
     double text_scale = (double)button.rect.width / 490.0;
-    cv::Size textSize = cv::getTextSize(button.text, cv::FONT_HERSHEY_SIMPLEX, text_scale, 1, &baseline);
-    cv::Point textOrg(button.rect.x + (button.rect.width - textSize.width) / 2, button.rect.y + (button.rect.height + textSize.height) / 2);
-    cv::putText(img, button.text, textOrg, cv::FONT_HERSHEY_SIMPLEX, text_scale, color, 1);
+    if (state == video_state) {
+        cv::Size textSize = cv::getTextSize(button.text1, cv::FONT_HERSHEY_SIMPLEX, text_scale, 1, &baseline);
+        cv::Point textOrg(button.rect.x + (button.rect.width - textSize.width) / 2, button.rect.y + (button.rect.height + textSize.height) / 2);
+        cv::putText(img, button.text1, textOrg, cv::FONT_HERSHEY_SIMPLEX, text_scale, color, 1);
+    }
+    else {
+        cv::Size textSize = cv::getTextSize(button.text2, cv::FONT_HERSHEY_SIMPLEX, text_scale, 1, &baseline);
+        cv::Point textOrg(button.rect.x + (button.rect.width - textSize.width) / 2, button.rect.y + (button.rect.height + textSize.height) / 2);
+        cv::putText(img, button.text2, textOrg, cv::FONT_HERSHEY_SIMPLEX, text_scale, color, 1);
+    }
 }
 
 
@@ -264,14 +305,30 @@ void initButtons(std::vector<Button>& buttons) {
             //btn.rect = cv::Rect(j * buttonWidth, originalHeight + i * buttonHeight, buttonWidth, buttonHeight);
             btn.rect = cv::Rect(0, 0, 1, 1);
             //btn.text = "Button " + std::to_string(i * 2 + j + 1);
-            if (k == 0) btn.text = "-";
-            if (k == 1) btn.text = "+";
-            if (k == 2) btn.text = "Palette change";
-            if (k == 3) btn.text = "Mode change";
-            if (k == 4) btn.text = "Focus zoom";
-            if (k == 5) btn.text = "RAW histogram";
-            if (k == 6) btn.text = "Save picture";
-            if (k == 7) btn.text = "Exit";
+            if (k == 0) btn.text1 = "-";
+            if (k == 0) btn.text2 = "-";
+
+            if (k == 1) btn.text1 = "+";
+            if (k == 1) btn.text2 = "+";
+
+            if (k == 2) btn.text1 = "Palette change";
+            if (k == 2) btn.text2 = "Palette change";
+
+            if (k == 3) btn.text1 = "Mode change";
+            if (k == 3) btn.text2 = "Mode change";
+
+            if (k == 4) btn.text1 = "Focus zoom";
+            if (k == 4) btn.text2 = "Zoom";
+
+            if (k == 5) btn.text1 = "RAW histogram";
+            if (k == 5) btn.text2 = "RAW histogram";
+
+            if (k == 6) btn.text1 = "Save picture";
+            if (k == 6) btn.text2 = "Save picture";
+
+            if (k == 7) btn.text1 = "Exit";
+            if (k == 7) btn.text2 = "Exit";
+
             btn.pressed = false;
             buttons.push_back(btn);
             k++;
@@ -317,23 +374,66 @@ cv::Mat addButtonField(cv::Mat& img, std::vector<Button>& buttons) {
 }
 
 
-void onMouse(int event, int x, int y, int, void* userdata) {
-    if (event != cv::EVENT_LBUTTONDOWN) {
-        return;
-    }
+void onMouse_Black_Window(int event, int x, int y, int, void* userdata) {
+    if (event == cv::EVENT_LBUTTONDOWN)
+        destroyWindow("Black_Window");
+}
 
-    std::vector<Button>* buttons = reinterpret_cast<std::vector<Button>*>(userdata);
-    for (size_t i = 0; i < buttons->size(); ++i) {
-        if (buttons->at(i).rect.contains(cv::Point(x, y))) {
-            //buttons->at(i).pressed = !buttons->at(i).pressed;
-            buttons->at(i).pressed = true;
-            //std::cout << "Button " << (i + 1) << " pressed status: " << buttons->at(i).pressed << std::endl;
-            break;
+
+void onMouse(int event, int x, int y, int, void* userdata) {
+    //if (event != cv::EVENT_LBUTTONDOWN) {
+    //    return;
+    //}
+
+    // process mouse click on buttons
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        std::vector<Button>* buttons = reinterpret_cast<std::vector<Button>*>(userdata);
+        for (size_t i = 0; i < buttons->size(); ++i) {
+            if (buttons->at(i).rect.contains(cv::Point(x, y))) {
+                //buttons->at(i).pressed = !buttons->at(i).pressed;
+                buttons->at(i).pressed = true;
+                //std::cout << "Button " << (i + 1) << " pressed status: " << buttons->at(i).pressed << std::endl;
+                break;
+            }
         }
     }
+
+    // show black screen on mouse click on image
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        cv::Rect rect = cv::Rect(0, 0, display_image.cols, display_image.rows * 0.9);
+        if (rect.contains(cv::Point(x, y))) {
+            Mat black_image(800, 800, CV_8UC3, Scalar(0, 0, 0));
+            cv::Point textOrg(50, 50);
+            cv::Scalar color = cv::Scalar(20, 20, 255);
+            cv::putText(black_image, "Black screen mode, mouse click to close", textOrg, cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
+
+            namedWindow("Black_Window", WINDOW_NORMAL);
+            moveWindow("Black_Window", 0, 0);
+            setWindowProperty("Black_Window", WND_PROP_FULLSCREEN, WINDOW_FULLSCREEN);
+            imshow("Black_Window", black_image);
+
+            setMouseCallback("Black_Window", onMouse_Black_Window);
+
+            waitKey(1);
+            //destroyWindow("Black_Window");
+        }
+    }
+
 }
 //---------------- GUI
 
+
+// protection from locking main screen without connected eyepiece screen
+void onMouse_Eyepiece(int event, int x, int y, int, void* userdata) {
+    //if (event != cv::EVENT_LBUTTONDBLCLK) {
+    //    return;
+    //}
+
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        std::vector<Button>* buttons = reinterpret_cast<std::vector<Button>*>(userdata);
+        buttons->at(7).pressed = true;  // Exit button activated
+    }
+}
 
 
 
@@ -353,20 +453,38 @@ void compute_LUT(float gamma) {
     else
         gamma_dark = 0.118 * gamma + 3.235;
 
+    //gamma_dark = gamma_dark / star_protection_factor;
+
     //gamma_dark = gamma / 10;
 
 
     //cout << "gamma: " << gamma << " " << gamma_dark << endl;
 
     LUT_max_y = atan(gamma);
-    LUT_dark_max_y = atan(tan(1.0 * LUT_max_y) / gamma * gamma_dark);
-    //LUT_dark_max_y = atan(gamma_dark);
+    //LUT_dark_max_y = atan(tan(1.0 * LUT_max_y) / gamma * gamma_dark);
+    LUT_dark_max_y = atan(gamma_dark);
     //LUT_max_y = asinh(gamma);
     for (int i = 0; i < LUT_size; i++) {
         LUT_in[i] = i / (float)(LUT_size);
-        LUT_out[i] = atan(LUT_in[i] * gamma) / LUT_max_y;
-        LUT_dark_out[i] = atan(tan( LUT_in[i] * LUT_max_y) / gamma * gamma_dark ) / LUT_dark_max_y;
+
+        // for stretch
+        //LUT_out[i] = atan(LUT_in[i] * gamma) / LUT_max_y;
+
+        // inverse partiall curve for highligth protection
+        //LUT_dark_out[i] = atan(tan( LUT_in[i] * LUT_max_y) / gamma * gamma_dark ) / LUT_dark_max_y;
         
+        // non-inverse curve for highligth protection
+        //LUT_dark_out[i] = atan(LUT_in[i] * gamma_dark) / LUT_dark_max_y;
+
+
+        // more realistic, more liniear stars
+        //LUT_out[i] = (atan(LUT_in[i] * gamma) / LUT_max_y * 0.7) + (LUT_in[i] * 0.3);
+        LUT_out[i] = (atan(LUT_in[i] * gamma) / LUT_max_y * star_protection_factor) + (sqrt(LUT_in[i]) * (1-star_protection_factor));
+
+        LUT_dark_out[i] = (atan(LUT_in[i] * gamma_dark) / LUT_dark_max_y * star_protection_factor) + (sqrt(LUT_in[i]) * (1 - star_protection_factor));
+
+
+
 
 
         //LUT_dark_out[i] = atan(LUT_in[i] * gamma_dark) / LUT_dark_max_y;
@@ -397,9 +515,9 @@ void compute_LUT(float gamma) {
         line(LUTImage, Point(cvRound(500 * LUT_in[i - 1]), cvRound(500 - 500*LUT_out[i - 1])),
                        Point(cvRound(500 * LUT_in[i]), cvRound(500 - 500 * LUT_out[i])),
                        Scalar(255), 1, 8, 0);
-        line(LUTImage, Point(cvRound(500 * LUT_in[i - 1]), cvRound(500 - 500 * LUT_dark_out[i - 1])),
-            Point(cvRound(500 * LUT_in[i]), cvRound(500 - 500 * LUT_dark_out[i])),
-            Scalar(255), 1, 8, 0);
+        //line(LUTImage, Point(cvRound(500 * LUT_in[i - 1]), cvRound(500 - 500 * LUT_dark_out[i - 1])),
+        //    Point(cvRound(500 * LUT_in[i]), cvRound(500 - 500 * LUT_dark_out[i])),
+        //    Scalar(255), 1, 8, 0);
         
     }
     imshow("LUT", LUTImage);
@@ -1437,7 +1555,8 @@ void read_darks(Mat& dark_v_32sc1, double& dark_v_mean, Mat& dark_f_32sc1, doubl
         Scalar mean, stddev;
         meanStdDev(dark_v_32sc1, mean, stddev);
         dark_v_mean = mean[0];
-        hotpixel_threshold = dark_v_mean + stddev[0] * 7;
+        dark_v_stdev = stddev[0];
+        hotpixel_threshold = dark_v_mean + dark_v_stdev * 7;
 
         if (debug_flag == 1) {
             cout << "Dark v mean value: " << dark_v_mean << endl;
@@ -1644,7 +1763,8 @@ void read_darks(Mat& dark_v_32sc1, double& dark_v_mean, Mat& dark_f_32sc1, doubl
         Scalar mean, stddev;
         meanStdDev(dark_f_32sc1, mean, stddev);
         dark_f_mean = mean[0];
-        hotpixel_threshold = dark_f_mean + stddev[0] * 7;
+        dark_f_stdev = stddev[0];
+        hotpixel_threshold = dark_f_mean + dark_f_stdev * 7;
 
         if (debug_flag == 1) {
             cout << "Dark f mean value: " << dark_f_mean << endl;
@@ -1778,6 +1898,187 @@ void read_darks(Mat& dark_v_32sc1, double& dark_v_mean, Mat& dark_f_32sc1, doubl
 
         
 }
+
+
+
+
+
+
+
+
+
+
+
+void add_frame_hotpixels(Mat& frame, double dark_stdev)
+{
+
+
+    //if ((dark_f_hotpixel_flag == 1) || (dark_f_subtract_flag == 1)) {
+    if (true) {
+
+        //int32_t hotpixel_threshold = dark_stdev * 10;
+        int32_t hotpixel_threshold = 65000 / bin / bin / 2;
+
+        if (debug_flag == 1) {
+            cout << "Additional hotpixel threshold value: " << hotpixel_threshold << endl;
+            logfile << "Additional hotpixel threshold value: " << hotpixel_threshold << endl;
+        }
+
+
+        //-----------Search and count hot pixels
+        num_hotpixel_add = 0;
+
+        for (int i = 0; i < frame.rows; i++)
+            for (int j = 0; j < frame.cols; j++) {
+
+                int32_t sum = 0;
+                int n = 0;
+
+                if ( (i > 1) && (j > 1) && (i < (frame.rows - 2)) && (j < (frame.cols - 2)) ) {
+                    sum = frame.at<int32_t>((i - 2), (j - 2)) +
+                          frame.at<int32_t>((i + 2), (j + 2)) +
+                          frame.at<int32_t>((i - 2), (j + 2)) +
+                          frame.at<int32_t>((i + 2), (j - 2)) +
+                          frame.at<int32_t>((i - 2), (j)) +
+                          frame.at<int32_t>((i + 2), (j)) +
+                          frame.at<int32_t>((i), (j - 2)) +
+                          frame.at<int32_t>((i), (j + 2));
+                    n = 8;
+                }
+
+                if ( (n>0) && (frame.at<int32_t>(i, j) > (sum / 8 + hotpixel_threshold)) && ((sum / 8) < 13000)) {
+                    num_hotpixel_add++;
+                }
+
+                // for test
+                //if (i == 61 && j == 282)
+                //    cout << sum << "  " << frame.at<int32_t>(i, j) << endl;
+
+            }
+
+        if (debug_flag == 1) {
+            cout << "Additional hot pixels found in frame: " << num_hotpixel_add << endl;
+            logfile << "Additional hot pixels found in frame: " << num_hotpixel_add << endl;
+        }
+
+        
+        //-----------Search and list hot pixels
+        hotpixel_list_add = (int*)malloc(sizeof(int) * num_hotpixel_add * 10);
+        
+        num_hotpixel_add = 0;
+
+        for (int i = 0; i < frame.rows; i++)
+            for (int j = 0; j < frame.cols; j++) {
+
+                int64_t sum = 0;
+                int n = 0;
+
+                if ((i > 1) && (j > 1) && (i < (frame.rows - 2)) && (j < (frame.cols - 2))) {
+                    sum = frame.at<int32_t>((i - 2), (j - 2)) +
+                        frame.at<int32_t>((i + 2), (j + 2)) +
+                        frame.at<int32_t>((i - 2), (j + 2)) +
+                        frame.at<int32_t>((i + 2), (j - 2)) +
+                        frame.at<int32_t>((i - 2), (j)) +
+                        frame.at<int32_t>((i + 2), (j)) +
+                        frame.at<int32_t>((i), (j - 2)) +
+                        frame.at<int32_t>((i), (j + 2));
+                    n = 8;
+                }
+
+                if ( (n > 0) && (frame.at<int32_t>(i, j) > (sum / 8 + hotpixel_threshold)) && ((sum / 8) < 13000) ) {
+                   
+                    hotpixel_list_add[num_hotpixel_add * 10 + 0] = i; //save coordinates of hotpixel
+                    hotpixel_list_add[num_hotpixel_add * 10 + 1] = j;
+
+
+                    //-----
+                    if ((i > 1) &&
+                        (j > 1) &&
+                        (frame.at<int32_t>((i - 2), (j - 2)) < (sum / 8 + hotpixel_threshold)) ) {   // valid neighbor pixel for interpolation
+                        hotpixel_list_add[num_hotpixel_add * 10 + 2] = 1;
+                    }
+                    else
+                        hotpixel_list_add[num_hotpixel_add * 10 + 2] = 0;
+                    //-----
+                    if ((i > 1) &&
+                        (frame.at<int32_t>((i - 2), (j)) < (sum / 8 + hotpixel_threshold)) ) {   // valid neighbor pixel for interpolation
+                        hotpixel_list_add[num_hotpixel_add * 10 + 3] = 1;
+                    }
+                    else
+                        hotpixel_list_add[num_hotpixel_add * 10 + 3] = 0;
+                    //-----
+                    if ((i > 1) &&
+                        (j < (frame.cols - 2)) &&
+                        (frame.at<int32_t>((i - 2), (j + 2)) < (sum / 8 + hotpixel_threshold)) ) {   // valid neighbor pixel for interpolation
+                        hotpixel_list_add[num_hotpixel_add * 10 + 4] = 1;
+                    }
+                    else
+                        hotpixel_list_add[num_hotpixel_add * 10 + 4] = 0;
+                    //-----
+                    if ((j < (frame.cols - 2)) &&
+                        (frame.at<int32_t>((i), (j + 2)) < (sum / 8 + hotpixel_threshold)) ) {   // valid neighbor pixel for interpolation
+                        hotpixel_list_add[num_hotpixel_add * 10 + 5] = 1;
+                    }
+                    else
+                        hotpixel_list_add[num_hotpixel_add * 10 + 5] = 0;
+                    //-----
+                    if ((i < (frame.rows - 2)) &&
+                        (j < (frame.cols - 2)) &&
+                        (frame.at<int32_t>((i + 2), (j + 2)) < (sum / 8 + hotpixel_threshold)) ) {   // valid neighbor pixel for interpolation
+                        hotpixel_list_add[num_hotpixel_add * 10 + 6] = 1;
+                    }
+                    else
+                        hotpixel_list_add[num_hotpixel_add * 10 + 6] = 0;
+                    //-----
+                    if ((i < (frame.rows - 2)) &&
+                        (frame.at<int32_t>((i + 2), (j)) < (sum / 8 + hotpixel_threshold)) ) {   // valid neighbor pixel for interpolation
+                        hotpixel_list_add[num_hotpixel_add * 10 + 7] = 1;
+                    }
+                    else
+                        hotpixel_list_add[num_hotpixel_add * 10 + 7] = 0;
+                    //-----
+                    if ((i < (frame.rows - 2)) &&
+                        (j > 1) &&
+                        (frame.at<int32_t>((i + 2), (j - 2)) < (sum / 8 + hotpixel_threshold)) ) {   // valid neighbor pixel for interpolation
+                        hotpixel_list_add[num_hotpixel_add * 10 + 8] = 1;
+                    }
+                    else
+                        hotpixel_list_add[num_hotpixel_add * 10 + 8] = 0;
+                    //-----
+                    if ((j > 1) &&
+                        (frame.at<int32_t>((i), (j - 2)) < (sum / 8 + hotpixel_threshold)) ) {   // valid neighbor pixel for interpolation
+                        hotpixel_list_add[num_hotpixel_add * 10 + 9] = 1;
+                    }
+                    else
+                        hotpixel_list_add[num_hotpixel_add * 10 + 9] = 0;
+                    //-----
+                    
+                    num_hotpixel_add++;
+                }
+
+            }
+
+        if (debug_flag == 1) {
+            cout << "Additional hot pixels in frame listed" << endl;
+            logfile << "Additional hot pixels in frame listed" << endl;
+        }
+
+
+    }
+
+
+
+}
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -2273,9 +2574,11 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
     }
 
     std::vector<std::thread> threads;
-    int maxThreads = std::thread::hardware_concurrency(); // Number of CPU cores
+    int maxThreads = std::thread::hardware_concurrency(); // Number of available hardware threads
+    if (maxThreads == 0) maxThreads = 4;
+    if (AI_num_threads > 0) maxThreads = AI_num_threads;
 
-    cout << "available threads: " << maxThreads << endl;
+    cout << "used number of threads: " << maxThreads << endl;
 
     int tileSize = 64;
     int overlap = 7;
@@ -2357,7 +2660,10 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
     int width = image.cols;
     int height = image.rows;
     Rect cropRegion(0, 0, width, height);
-    image = bigImage_out(cropRegion);
+    if (mix > 0.99)
+        image = bigImage_out(cropRegion);
+    else
+        image = image * (1.0 - mix) + bigImage_out(cropRegion) * mix;
 
     //bigImage_out.copyTo(image);
 
@@ -2658,11 +2964,12 @@ void enhance_stars2(Mat& stack_image, Mat& final_image, float star_blob_radius, 
 
 
 
-void highlight_protection(Mat& image)
+//void highlight_protection(Mat& image)
+void highlight_protection(Mat& image, Mat& dark_image)
 {
-    Mat dark_image;
-    image.copyTo(dark_image);
-    gamma_dark_correction(dark_image, 1.0);
+    //Mat dark_image;
+    //image.copyTo(dark_image);
+    //gamma_dark_correction(dark_image, 1.0);
 
     Mat mask_for_dark, mask_for_orig;
     cvtColor(image, mask_for_dark, cv::COLOR_BGR2GRAY);
@@ -2670,6 +2977,7 @@ void highlight_protection(Mat& image)
     int blur_size = std::min(image.cols, image.rows);
     blur_size = blur_size / 300;
     if (blur_size < 4) blur_size = 4;
+    if ((blur_size % 2) == 0) blur_size -= 1;
 
     medianBlur(mask_for_dark, mask_for_dark, blur_size);
     GaussianBlur(mask_for_dark, mask_for_dark, Size(blur_size, blur_size), 0);
@@ -2691,6 +2999,319 @@ void highlight_protection(Mat& image)
 
 
 
+void save_sub_image(Mat& image)
+{
+
+    cout << "Saving sub image..." << endl;
+
+    time_t t = time(0);   // get time now
+    struct tm* now = localtime(&t);
+    char filename[80];
+
+    Mat mat16uc3;
+
+    strftime(filename, 80, "subs/sub_%Y-%m-%d_%H-%M-%S.tiff", now);
+
+    image.convertTo(mat16uc3, CV_16UC3, 65535);
+    imwrite(filename, mat16uc3);
+
+    cout << "Sub images saved" << endl;
+}
+
+
+
+
+
+
+
+
+// Acquisition thread: captures and pre-processes frames
+void acquisition_thread() {
+    
+    cout << "acquisition_thread started" << endl;
+    logfile << "acquisition_thread started" << endl;
+
+    while (capture_running) {
+
+        if (mode_change == true) {   // check if mode should be changed
+            if (state == video_state) state = foto_state;
+            else state = video_state;
+
+            mode_change = false;
+        }
+
+
+        if ((old_state == foto_state) && (state == video_state)) {  // change to video mode
+            if (exposure_time_v < exposure_threshold) {  //video mode
+                stop_exposure();
+                set_camera_controls();
+                start_video();
+                get_video_frame(); // dummy frame
+                frames_stacked = 0;
+            }
+            else {                            // single exposure mode
+                stop_exposure();
+                set_camera_controls();
+                start_exposure();
+                frames_stacked = 0;
+            }
+        }
+        else if ((old_state == video_state) && (state == foto_state)) {  // change to foto/stacking exposure mode
+            if (exposure_time_v < exposure_threshold) {  //video mode
+                stop_video();
+                set_camera_controls();
+                start_exposure();
+                get_video_frame(); // dummy frame
+                frames_stacked = 0;
+            }
+            else {                             // single exposure mode
+                stop_exposure();
+                set_camera_controls();
+                start_exposure();
+                frames_stacked = 0;
+            }
+        }/**/
+        else if ((old_state == video_state) && (state == video_state)) {  // video mode, check for new frame
+
+            if ((exposure_time_v < exposure_threshold) || ((exposure_time_v >= exposure_threshold) && (exposure_status() == 1))) {
+
+                if (exposure_time_v < exposure_threshold) {    //video mode
+                    get_video_frame();
+                }
+                else {
+                    get_foto_frame();
+                    start_exposure();
+                }
+
+                //process video frame
+                // Copy the data into an OpenCV Mat structure
+                Mat mat16uc1_bayer2(camera_image_height, camera_image_width, CV_16UC1, asi_image);
+                Mat mat16uc1_bayer(camera_image_height, camera_image_width, CV_16UC1);
+                mat16uc1_bayer2.copyTo(mat16uc1_bayer);
+
+                // check if RAW histogram should be shown
+                //if (hist_show_state == 1) {
+                //    mat16uc1_bayer.copyTo(RAW_image);
+                //}
+
+                // copy raw frame for showing histogram
+                {
+                    lock_guard<mutex> lock(RAW_image_mutex);
+                    shared_RAW_image = mat16uc1_bayer.clone();
+                }
+
+
+                // Convert to int32
+                Mat mat32sc1_bayer(camera_image_height, camera_image_width, CV_32SC1);
+                mat16uc1_bayer.convertTo(mat32sc1_bayer, CV_32SC1);
+
+                //Dark Frame
+                if (dark_v_subtract_flag == 1)
+                    apply_dark(mat32sc1_bayer, dark_v_32sc1, dark_v_mean);
+
+                //HotPixels
+                if (dark_v_hotpixel_flag == 1)
+                    correct_hotpixel(mat32sc1_bayer, hotpixel_list_v, num_hotpixel_v);
+
+                // Convert to uint16
+                mat32sc1_bayer.convertTo(mat16uc1_bayer, CV_16UC1);
+
+                // Decode Bayer data to RGB or mix monochrome to RGB
+                Mat mat16uc3_rgb(camera_image_height, camera_image_width, CV_16UC3);
+                if (asi_camera_info[cam]->IsColorCam == ASI_TRUE)
+                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
+                else
+                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_GRAY2BGR);
+
+
+                // Convert to float32
+                mat16uc3_rgb.convertTo(stack_image_acq, CV_32FC3, 1 / 65536.0);
+
+                //Apply flat
+                if (flat_v_flag == 1) {
+                    if (debug_flag == 1) {
+                        cout << "Apply flat" << endl;
+                        logfile << "Apply flat" << endl;
+                    }
+
+                    if ((dark_v_subtract_flag == 1) || (dark_v_hotpixel_flag == 1)) {
+                        stack_image_acq = stack_image_acq - Scalar(dark_v_mean / 65536.0, dark_v_mean / 65536.0, dark_v_mean / 65536.0);
+                        //stack_image = stack_image - scl_dark_v_mean;
+                        multiply(stack_image_acq, flat_inv_32fc3, stack_image_acq);   // full applying of flat frame
+                        stack_image_acq = stack_image_acq + Scalar(dark_v_mean / 65536.0, dark_v_mean / 65536.0, dark_v_mean / 65536.0);
+                        //stack_image = stack_image + scl_dark_v_mean;
+                    }
+                    else
+                        multiply(stack_image_acq, flat_inv_32fc3, stack_image_acq);   // full applying of flat frame
+                }
+ 
+
+                {
+                    lock_guard<mutex> lock(stack_image_mutex);
+                    shared_stack_image = stack_image_acq.clone();
+                    new_frame_available = true;
+                    //cout << "copy buffer" << endl;
+                }
+
+                frames_stacked = 1;
+
+            }
+            else
+                this_thread::sleep_for(chrono::milliseconds(50));
+
+        }
+        /**/
+        else if ((old_state == foto_state) && (state == foto_state)) {  // long exposure mode, check for new frame
+            if (exposure_status() == 1)
+            {
+                get_foto_frame();
+
+                start_exposure();
+
+                //frames_stacked++;
+
+                // Copy the data into an OpenCV Mat structure
+                Mat mat16uc1_bayer(camera_image_height, camera_image_width, CV_16UC1, asi_image);
+
+                // check if RAW histogram should be shown
+                //if (hist_show_state == 1) {
+                //    mat16uc1_bayer.copyTo(RAW_image);
+                //}
+
+                // copy raw frame for showing histogram
+                {
+                    lock_guard<mutex> lock(RAW_image_mutex);
+                    shared_RAW_image = mat16uc1_bayer.clone();
+                }
+
+                // Convert to int32
+                Mat mat32sc1_bayer(camera_image_height, camera_image_width, CV_32SC1);
+                mat16uc1_bayer.convertTo(mat32sc1_bayer, CV_32SC1);
+
+                //Dark Frame
+                if (dark_f_subtract_flag == 1)
+                    apply_dark(mat32sc1_bayer, dark_f_32sc1, dark_f_mean);
+
+                //HotPixels
+                if (dark_f_hotpixel_flag == 1)
+                    correct_hotpixel(mat32sc1_bayer, hotpixel_list_f, num_hotpixel_f);
+
+
+                //additional HotPixels from first frame
+                if (add_hotpixel_flag_f == 1) {
+                    if (frames_stacked == 0)
+                        add_frame_hotpixels(mat32sc1_bayer, dark_f_stdev);
+                    correct_hotpixel(mat32sc1_bayer, hotpixel_list_add, num_hotpixel_add);
+                }
+
+
+                // Convert to uint16
+                mat32sc1_bayer.convertTo(mat16uc1_bayer, CV_16UC1);
+
+
+                // Decode Bayer data to RGB or mix monochrome to RGB
+                Mat mat16uc3_rgb(camera_image_height, camera_image_width, CV_16UC3);
+                if (asi_camera_info[cam]->IsColorCam == ASI_TRUE)
+                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
+                else
+                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_GRAY2BGR);
+
+
+                // Convert to float32
+                Mat mat32fc3_rgb(camera_image_height, camera_image_width, CV_32FC3);
+                mat16uc3_rgb.convertTo(mat32fc3_rgb, CV_32FC3, 1 / 65536.0);
+
+
+                if (flat_f_flag == 1) {
+                    if ((dark_f_subtract_flag == 1) || (dark_f_hotpixel_flag == 1)) {
+                        if (debug_flag == 1) {
+                            cout << "Apply flat" << endl;
+                            logfile << "Apply flat" << endl;
+                        }
+
+                        mat32fc3_rgb = mat32fc3_rgb - Scalar(dark_f_mean / 65536.0, dark_f_mean / 65536.0, dark_f_mean / 65536.0);
+                        multiply(mat32fc3_rgb, flat_inv_32fc3, mat32fc3_rgb);   // full applying of flat frame
+                        mat32fc3_rgb = mat32fc3_rgb + Scalar(dark_f_mean / 65536.0, dark_f_mean / 65536.0, dark_f_mean / 65536.0);
+                    }
+                    else
+                        multiply(mat32fc3_rgb, flat_inv_32fc3, mat32fc3_rgb);   // full applying of flat frame
+                }
+
+                if (frames_stacked == 0) {
+                    mat32fc3_rgb.copyTo(first_image_acq);
+                    mat32fc3_rgb.copyTo(sum_image_acq);
+                }
+                else {  // stacking done here
+
+                    // Register
+
+                    Ptr<Mapper> mapper = makePtr<MapperGradEuclid>();
+                    MapperPyramid mappPyr(mapper);
+
+                    if (frames_stacked == 1)
+                        mapPtr = mappPyr.calculate(first_image_acq, mat32fc3_rgb);
+                    else
+                        mapPtr = mappPyr.calculate(first_image_acq, mat32fc3_rgb, mapPtr_old);
+
+                    mapPtr_old = mapPtr;
+
+                    Ptr<MapAffine> mapAff = MapTypeCaster::toAffine(mapPtr);
+
+                    if (debug_flag == 1) {
+                        // Print result
+                        cout << endl << "Image shift: " << endl;
+                        //cout << Mat(mapAff->getLinTr()) << endl;
+                        cout << Mat(mapAff->getShift()) << endl;
+                        logfile << endl << "Image shift: " << endl;
+                        logfile << Mat(mapAff->getShift()) << endl;
+                    }
+
+                    // Alignment
+                    MapAffine mapTest(mapAff->getLinTr(), mapAff->getShift());
+                    mapTest.inverseWarp(mat32fc3_rgb, mat32fc3_rgb);
+
+                    sum_image_acq = sum_image_acq + mat32fc3_rgb;
+
+                    if (save_subs == 1)
+                        save_sub_image(mat32fc3_rgb);
+                }
+
+                stack_image_acq = sum_image_acq / (float)(frames_stacked + 1);
+
+                //test without stacking
+                //mat32fc3_rgb.copyTo(stack_image_acq);
+
+                //new_picture = 1;
+
+                {
+                    lock_guard<mutex> lock(stack_image_mutex);
+                    shared_stack_image = stack_image_acq.clone();
+                    new_frame_available = true;
+                }
+
+
+                frames_stacked++;
+
+                //wait_idle();
+
+            }
+            else
+                this_thread::sleep_for(chrono::milliseconds(50));
+        } /**/
+
+        old_state = state;
+
+    }
+    
+
+    cout << "acquisition_thread stopping..." << endl;
+    logfile << "acquisition_thread stopping..." << endl;
+}
+
+
+
+
+
 
 
 
@@ -2699,8 +3320,8 @@ int main(int argc, char* argv[])
 {
 
 #define sw_name      "Digital Astronomy Eyepiece App"
-#define version      "Version 0.200 beta, 02.09.2024"
-#define copyright    "Copyright Andriy Melnykov 2024"
+#define version      "Version 0.400, 01.05.2025"
+#define copyright    "Copyright Andriy Melnykov 2025"
 #define supp_cameras "This version supports only ZWO ASI cameras"
 #define libraries    "Libraries used (see also licenses folder):"
 #define license_1    "ASICamera2 SDK, copyright ZWO company"
@@ -2799,7 +3420,21 @@ int main(int argc, char* argv[])
         }
     }
 
-    color_palette = palette_rgb;
+    // check for "subs" folder
+    if (save_subs == 1) {
+        fs::path dir = "subs";
+        if (!fs::exists(dir)) {
+            // The directory does not exist, so try to create it
+            if (!fs::create_directory(dir)) {
+                throw std::runtime_error("Failed to create directory: " + dir.string());
+            }
+            else {
+                cout << "Directory 'subs' created" << endl;
+            }
+        }
+    }
+
+    
 
     check_cameras();
     
@@ -2814,14 +3449,7 @@ int main(int argc, char* argv[])
 
     open_init_camera();
 
-    state = video_state;
-    old_state = foto_state;
-
-    gamma = init_gamma;
-    compute_LUT(gamma); // first LUT initialisation
     
-    focusing_flag = 0;
-
     //Read darks and flats
     if ( (dark_v_hotpixel_flag == 1) || (dark_v_subtract_flag == 1) || (dark_f_hotpixel_flag == 1) || (dark_f_subtract_flag == 1) )
         read_darks(dark_v_32sc1, dark_v_mean, dark_f_32sc1, dark_f_mean);
@@ -2844,12 +3472,48 @@ int main(int argc, char* argv[])
         //destroyWindow("Eyepiece");
     }
 
+
+
+    //Start main window
+    Mat black_image(display_height, display_height, CV_32FC3, Scalar(0, 0, 0));
+    namedWindow("Display window");
+    setMouseCallback("Display window", onMouse, &buttons);
+    if (GUI_flag == 1) {
+        Mat display_image_Buttons = addButtonField(black_image, buttons);
+        imshow("Display window", display_image_Buttons);
+    }
+    else
+        imshow("Display window", black_image);
+
+
+
+
+    gamma = init_gamma;
+    compute_LUT(gamma); // first LUT initialisation
+
+    focusing_flag = 0;
+
+    color_palette = palette_rgb;
+
+    state = foto_state;
+    old_state = foto_state;
+
+    mode_change = true;
+
+
+    // starting separate thread for camera frame acquisition and pre-processing
+    thread acqThread(acquisition_thread);
+
+ 
+
+    new_picture = 0;
+
     key = -1;
     while ((key != key_exit) && (buttons[7].pressed == false)) {
 
         if (debug_flag == 1) {
             if (key != -1) {
-                cout << "Key pressed: " << (char)key << endl;
+                //cout << "Key pressed: " << (char)key << endl;
                 logfile << "Key pressed: " << (char)key << endl;
             }
         }
@@ -2861,23 +3525,46 @@ int main(int argc, char* argv[])
             
             new_picture = 1;
             buttons[2].pressed = false;
+
+            logfile << "Key/button pressed: palette" << endl;
         }
 
         // state machine change state
         if ((key == key_mode) || (buttons[3].pressed == true)) {
-            if (state == video_state) state = foto_state;
-            else state = video_state;
+            //if (state == video_state) state = foto_state;
+            //else state = video_state;
+
+            mode_change = true;
+
+            // reset all zooms
+            focusing_flag = 0;
+            display_zoom_value = display_zoom_value_stored;
 
             buttons[3].pressed = false;
+
+            //cout << "state change" << endl;
+            logfile << "Key/button pressed: mode" << endl;
         }
 
-        // focusing zoom
+        // focusing zoom / zoom
         if ((key == key_focusing) || (buttons[4].pressed == true)) {
-            if (focusing_flag == 1) focusing_flag = 0;
-            else focusing_flag = 1;
+            if (state == video_state) {
+                if (focusing_flag == 1) focusing_flag = 0;
+                else focusing_flag = 1;
+            }
+            else {
+                if (display_zoom_value > (display_zoom_value_stored * 1.9))
+                    display_zoom_value = display_zoom_value_stored;
+                else if (display_zoom_value > (display_zoom_value_stored * 1.1))
+                    display_zoom_value = display_zoom_value_stored * 2;
+                else
+                    display_zoom_value = display_zoom_value_stored * 1.5;
+            }
 
             new_picture = 1;
             buttons[4].pressed = false;
+
+            logfile << "Key/button pressed: zoom" << endl;
         }
 
         // gain change
@@ -2887,6 +3574,8 @@ int main(int argc, char* argv[])
             compute_LUT(gamma);
             new_picture = 1;
             buttons[1].pressed = false;
+
+            logfile << "Key/button pressed: +" << endl;
         }
         if ((key == key_minus) || (buttons[0].pressed == true)) {
             if (gamma > 0.5) gamma /= 1.5;
@@ -2894,9 +3583,16 @@ int main(int argc, char* argv[])
             compute_LUT(gamma);
             new_picture = 1;
             buttons[0].pressed = false;
+
+            logfile << "Key/button pressed: -" << endl;
         }
         // save image
-        if ((key == key_save_image) || (buttons[6].pressed == true)) {
+        if ( (key == key_save_image) || 
+             (buttons[6].pressed == true) ||
+             ( (auto_save_pictures == 1) && (frames_stacked > 1) && ((frames_stacked % auto_save_pictures_n) == 0) && (saved_at_frames_stacked != frames_stacked) )  ) {
+
+            if ((key != key_save_image) && (buttons[6].pressed != true))
+                saved_at_frames_stacked = frames_stacked;
 
             cout << "Saving images..." << endl;
             logfile << "Saving images..." << endl;
@@ -2906,20 +3602,22 @@ int main(int argc, char* argv[])
             char filename[80];
             
             Mat mat16uc3;
+            Mat mat8uc3;
 
             strftime(filename, 80, "saved_pictures/final_%Y-%m-%d_%H-%M-%S.tiff", now);
-
             final_image.convertTo(mat16uc3, CV_16UC3, 65535);
             imwrite(filename, mat16uc3);
 
-            strftime(filename, 80, "saved_pictures/display_%Y-%m-%d_%H-%M-%S.tiff", now);
+            //strftime(filename, 80, "saved_pictures/display_%Y-%m-%d_%H-%M-%S.tiff", now);
+            //display_image.convertTo(mat16uc3, CV_16UC3, 65535);
+            //imwrite(filename, mat16uc3);
 
-            display_image.convertTo(mat16uc3, CV_16UC3, 65535);
-            imwrite(filename, mat16uc3);
+            strftime(filename, 80, "saved_pictures/display_%Y-%m-%d_%H-%M-%S.jpg", now);
+            display_image.convertTo(mat8uc3, CV_8UC3, 256);
+            imwrite(filename, mat8uc3);
 
             strftime(filename, 80, "saved_pictures/stack_%Y-%m-%d_%H-%M-%S.tiff", now);
-
-            stack_image.convertTo(mat16uc3, CV_16UC3, 65535);
+            stack_image_gui.convertTo(mat16uc3, CV_16UC3, 65535);
             imwrite(filename, mat16uc3);
 
             // saving info to text file
@@ -2928,11 +3626,11 @@ int main(int argc, char* argv[])
 
             picfile << "frames stacked: " << frames_stacked << endl;
             if (state == video_state) {
-                picfile << "integration time: " << frames_stacked << "x" << (exposure_time_v / 1000000) << "s = " << (frames_stacked * exposure_time_v / (double)1000000) << "s" << endl;
+                picfile << "integration time: " << frames_stacked << "x" << (exposure_time_v / (double)1000000) << "s = " << (frames_stacked * exposure_time_v / (double)1000000) << "s" << endl;
                 picfile << "camera gain: " << gain_v << endl;
             }
             else {
-                picfile << "integration time: " << frames_stacked << "x" << (exposure_time_f / 1000000) << "s = " << (frames_stacked * exposure_time_f / 1000000) << "s" << endl;
+                picfile << "integration time: " << frames_stacked << "x" << (exposure_time_f / (double)1000000) << "s = " << (frames_stacked * exposure_time_f / (double)1000000) << "s" << endl;
                 picfile << "camera gain: " << gain_f << endl;
             }
 
@@ -2943,7 +3641,7 @@ int main(int argc, char* argv[])
             cout << "Images saved" << endl;
             logfile << "Images saved" << endl;
 
-            new_picture = 1;
+            //new_picture = 1;
             buttons[6].pressed = false;
         }
 
@@ -2951,294 +3649,69 @@ int main(int argc, char* argv[])
         if ((key == key_histogram) || (buttons[5].pressed == true)) {
             if (hist_show_state == 1) hist_show_state = 0;
             else hist_show_state = 1;
+
             buttons[5].pressed = false;
+            new_picture = 1;
+
+            logfile << "Key/button pressed: histogram" << endl;
         }
 
-        double t;
-
-        if ( (old_state == video_state) && (state == video_state) ) {  // video mode, check for new frame
-            
-            if ( (exposure_time_v < exposure_threshold) || ( (exposure_time_v >= exposure_threshold) && (exposure_status() == 1) ) ) {
-            
-            //if (true) {
-                //get_video_frame();
-            //if (exposure_status() == 1) {
-
-                    //cout << "cycle start" << endl;
-                    t = (double)getTickCount();
-            
-
-                if (exposure_time_v < exposure_threshold) {    //video mode
-                    get_video_frame();
-                    //cout << "after get_video_frame in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
-                }
-                else {
-                    get_foto_frame();
-                    //cout << "after get_foto_frame in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
-                    start_exposure();
-                    //cout << "after start_exposure in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
-                }
-
-                frames_stacked = 1;
-
-                //process video frame
-                // Copy the data into an OpenCV Mat structure
-
-                    //double t = (double)getTickCount();
-                Mat mat16uc1_bayer2(camera_image_height, camera_image_width, CV_16UC1, asi_image);
-                Mat mat16uc1_bayer(camera_image_height, camera_image_width, CV_16UC1);
-                mat16uc1_bayer2.copyTo(mat16uc1_bayer);
-                    //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 3ms
-
-                // check if RAW histogram should be shown
-                if (hist_show_state == 1) {
-                    //show_RAW_histogram(mat16uc1_bayer);
-                    mat16uc1_bayer.copyTo(RAW_image);
-                }
-                //else
-                //    if (getWindowProperty("RAW Histogram", WND_PROP_VISIBLE) != 0) {
-                //        destroyWindow("RAW Histogram");
-                //    }
-
-                /**/
-                // Convert to int32
-
-                    //double t = (double)getTickCount();
-                Mat mat32sc1_bayer(camera_image_height, camera_image_width, CV_32SC1);
-                mat16uc1_bayer.convertTo(mat32sc1_bayer, CV_32SC1);
-                    //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 5ms
-
-                //Dark Frame
-
-                    //double t = (double)getTickCount();
-                if (dark_v_subtract_flag == 1)
-                    apply_dark(mat32sc1_bayer, dark_v_32sc1, dark_v_mean);
-                    //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 6ms
-
-                //HotPixels
-
-                    //double t = (double)getTickCount();
-                if (dark_v_hotpixel_flag == 1)
-                    correct_hotpixel(mat32sc1_bayer, hotpixel_list_v, num_hotpixel_v);
-                    //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 0.1ms
-
-                // Convert to uint16
-                    //double t = (double)getTickCount();
-                mat32sc1_bayer.convertTo(mat16uc1_bayer, CV_16UC1);
-                    //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 3ms
-                /**/
-
-                // Decode Bayer data to RGB or mix monochrome to RGB
-                    //double t = (double)getTickCount();
-                Mat mat16uc3_rgb(camera_image_height, camera_image_width, CV_16UC3);
-                if (asi_camera_info[cam]->IsColorCam == ASI_TRUE)
-                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
-                else
-                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_GRAY2BGR);
-                    //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 6ms
 
 
 
-                // Convert to float32
-                //Mat mat32fc3_rgb(asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, CV_32FC3);
-                    //double t = (double)getTickCount();
-                mat16uc3_rgb.convertTo(stack_image, CV_32FC3, 1 / 65536.0);
-                    //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 7ms
-
-                //Apply flat
-                    //double t = (double)getTickCount();
-                if (flat_v_flag == 1) {
-                    if (debug_flag == 1) {
-                        cout << "Apply flat" << endl;
-                        logfile << "Apply flat" << endl;
-                    }
-
-                    if ((dark_v_subtract_flag == 1) || (dark_v_hotpixel_flag == 1)) {
-                        stack_image = stack_image - Scalar(dark_v_mean / 65536.0, dark_v_mean / 65536.0, dark_v_mean / 65536.0);
-                        //stack_image = stack_image - scl_dark_v_mean;
-                        multiply(stack_image, flat_inv_32fc3, stack_image);   // full applying of flat frame
-                        stack_image = stack_image + Scalar(dark_v_mean / 65536.0, dark_v_mean / 65536.0, dark_v_mean / 65536.0);
-                        //stack_image = stack_image + scl_dark_v_mean;
-                    }
-                    else
-                        multiply(stack_image, flat_inv_32fc3, stack_image);   // full applying of flat frame
-                }
-                    //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 29ms!!! can be 13ms without 2x dark_v_mean
-
-                //Scalar scl_dark_v_mean = (dark_v_mean / 65536.0, dark_v_mean / 65536.0, dark_v_mean / 65536.0);
-                //stack_image = stack_image + scl_dark_v_mean;
-
-                new_picture = 1;
-                    //cout << "after flat in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
-                buttons[5].pressed = false;
-            }
-
-        }
-
-        else if ( (old_state == foto_state) && (state == foto_state) ) {  // long exposure mode, check for new frame
-            if (exposure_status() == 1)
-            {
-                get_foto_frame();
-
-                start_exposure();
-
-                frames_stacked++;
-
-                // Copy the data into an OpenCV Mat structure
-                Mat mat16uc1_bayer(camera_image_height, camera_image_width, CV_16UC1, asi_image);
-
-                // check if RAW histogram should be shown
-                if (hist_show_state == 1) {
-                    //show_RAW_histogram(mat16uc1_bayer);
-                    mat16uc1_bayer.copyTo(RAW_image);
-                }
-                //else
-                //    if (getWindowProperty("RAW Histogram", WND_PROP_VISIBLE) != 0) {
-                //        destroyWindow("RAW Histogram");
-                //    }
-
-                // Convert to int32
-                Mat mat32sc1_bayer(camera_image_height, camera_image_width, CV_32SC1);
-                mat16uc1_bayer.convertTo(mat32sc1_bayer, CV_32SC1);
 
 
-                //Dark Frame
-                if (dark_f_subtract_flag == 1)
-                    apply_dark(mat32sc1_bayer, dark_f_32sc1, dark_f_mean);
-
-                //HotPixels
-                if (dark_f_hotpixel_flag == 1)
-                    correct_hotpixel(mat32sc1_bayer, hotpixel_list_f, num_hotpixel_f);
-
-                
-                // Convert to uint16
-                mat32sc1_bayer.convertTo(mat16uc1_bayer, CV_16UC1);
 
 
-                // Decode Bayer data to RGB or mix monochrome to RGB
-                Mat mat16uc3_rgb(camera_image_height, camera_image_width, CV_16UC3);
-                if (asi_camera_info[cam]->IsColorCam == ASI_TRUE)
-                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
-                else
-                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_GRAY2BGR);
-                
-                
-                // Convert to float32
-                Mat mat32fc3_rgb(camera_image_height, camera_image_width, CV_32FC3);
-                mat16uc3_rgb.convertTo(mat32fc3_rgb, CV_32FC3, 1 / 65536.0);
 
 
-                //Apply flat
-                //if (flat_flag == 1)
-                //    multiply(mat32fc3_rgb, flat_inv_32fc3, mat32fc3_rgb);   // full applying of flat frame
-                //Apply flat
-                if (flat_f_flag == 1) {
-                    if ((dark_f_subtract_flag == 1) || (dark_f_hotpixel_flag == 1)) {
-                        if (debug_flag == 1) {
-                            cout << "Apply flat" << endl;
-                            logfile << "Apply flat" << endl;
-                        }
 
-                        mat32fc3_rgb = mat32fc3_rgb - Scalar(dark_f_mean / 65536.0, dark_f_mean / 65536.0, dark_f_mean / 65536.0);
-                        multiply(mat32fc3_rgb, flat_inv_32fc3, mat32fc3_rgb);   // full applying of flat frame
-                        mat32fc3_rgb = mat32fc3_rgb + Scalar(dark_f_mean / 65536.0, dark_f_mean / 65536.0, dark_f_mean / 65536.0);
-                    }
-                    else
-                        multiply(mat32fc3_rgb, flat_inv_32fc3, mat32fc3_rgb);   // full applying of flat frame
-                }
 
-                //Scalar scl_dark_f_mean = (dark_f_mean / 65536.0, dark_f_mean / 65536.0, dark_f_mean / 65536.0);
-                //mat32fc3_rgb = mat32fc3_rgb + scl_dark_f_mean;
 
-                /**/
-                if (frames_stacked == 1) {
-                    mat32fc3_rgb.copyTo(first_image);
-                    mat32fc3_rgb.copyTo(sum_image);                  
-                }
-                else {  // stacking done here
-                    
-                    // Register
-                    
-                    Ptr<Mapper> mapper = makePtr<MapperGradEuclid>();
-                    MapperPyramid mappPyr(mapper);
+        if ( new_frame_available && (mode_change == false) )
+            new_picture = 1;
 
-                    if (frames_stacked == 2) 
-                        mapPtr = mappPyr.calculate(first_image, mat32fc3_rgb);
-                    else
-                        mapPtr = mappPyr.calculate(first_image, mat32fc3_rgb, mapPtr_old);
 
-                    mapPtr_old = mapPtr;
 
-                    Ptr<MapAffine> mapAff = MapTypeCaster::toAffine(mapPtr);
-
-                    if (debug_flag == 1) {
-                        // Print result
-                        cout << endl << "Image shift: " << endl;
-                        //cout << Mat(mapAff->getLinTr()) << endl;
-                        cout << Mat(mapAff->getShift()) << endl;
-                        logfile << endl << "Image shift: " << endl;
-                        logfile << Mat(mapAff->getShift()) << endl;
-                    }
-
-                    // Alignment
-                    MapAffine mapTest(mapAff->getLinTr(), mapAff->getShift());
-                    mapTest.inverseWarp(mat32fc3_rgb, mat32fc3_rgb);
-
-                    sum_image = sum_image + mat32fc3_rgb;
-                }
-
-                stack_image = sum_image / (float)frames_stacked;
-                /**/
-
-                //test without stacking
-                //mat32fc3_rgb.copyTo(stack_image);
-                
-                new_picture = 1;
-
-                
-               
-                //wait_idle();
-
-                //start_exposure();
-            }
-        }
 
         // Show picture, if needed
         if (new_picture == 1) {
             new_picture = 0;
         
-                //cout << "start dispaly processing in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
+                
 
+            
+            
+            if (stack_from_file != 1) {
+                {
+                    lock_guard<mutex> lock(stack_image_mutex);
+                    if (new_frame_available) {
+                        stack_image_gui = shared_stack_image.clone();
+                        new_frame_available = false;
+                    }
+                }
+            }
 
-                //double t = (double)getTickCount();
-            stack_image.copyTo(final_image);
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 12ms!!!
+            stack_image_gui.copyTo(final_image);
+
 
 
             if (stack_from_file == 1) {
-                //Mat read_image = imread("C:/Users/HOME/Desktop/stacks_test/stack_2024-08-11_00-38-08.tiff", IMREAD_UNCHANGED);
-                //Mat read_image = imread("C:/Users/HOME/Desktop/stacks_test/stack_2024-08-10_23-48-17.tiff", IMREAD_UNCHANGED);
                 Mat read_image = imread("saved_pictures/test_image_stack.tiff", IMREAD_UNCHANGED);
-                //Mat read_image = imread("C:/Users/WinTab/Desktop/test_mode/saved_pictures/stack_2024-08-10_23-48-17.tiff", IMREAD_UNCHANGED);
                 read_image.convertTo(final_image, CV_32FC3, 1 / 65535.0);
-                //imshow("read", final_image);
             }
 
 
             //Banding filter
-                //double t = (double)getTickCount();
             if (((banding_filter_flag == 1) || (banding_filter_flag == 2)) && (state == video_state)) {
                 banding_filter(final_image, banding_filter_flag, banding_filter_strength, banding_filter_threshold);
             }
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 48ms!!!    29ms
                   
 
 
             //for bright stars "blobs"
-                //double t = (double)getTickCount();
             if ((enhance_stars_flag == 1) && (focusing_flag == 0))    //
                 enhance_stars(final_image, final_image, star_blob_radius, star_blob_strength);
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 240ms!!!  64ms
 
 
             // WB before stretch
@@ -3258,51 +3731,32 @@ int main(int argc, char* argv[])
 
 
 
-            // HDR tonemapping attempt
-            /*
-            vector<Mat> images;
-            images.push_back(final_image);
-            images.push_back(final_image*5);
-            images.push_back(final_image*25);
-            Mat fusion;
-            Ptr<MergeMertens> merge_mertens = createMergeMertens();
-            merge_mertens->process(images, fusion);
-            final_image = fusion * 25;
-            /**/
-
 
 
 
             // Black level, WB, Stretch, Black level-------------
             // Black level
-                //double t = (double)getTickCount();
             if (background_comp_flag == 1)
-                black_level(final_image, black_level_value);
+                if (state == video_state)
+                    black_level(final_image, black_level_value_v);
+                else
+                    black_level(final_image, black_level_value_f);
             else if (background_comp_flag == 2)
-                black_level_gradient(final_image, black_level_value);
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 232/339ms!!!   64ms/74ms
+                if (state == video_state)
+                    black_level_gradient(final_image, black_level_value_v);
+                else
+                    black_level_gradient(final_image, black_level_value_f);
+
+            final_image.copyTo(dark_image);  // for using as darker image for highlight protection
 
 
-            // WB after first black level, before stretch
-            /*
-                //double t = (double)getTickCount();
-            if ((WBcorr_R < 0.99) || (WBcorr_G < 0.99) || (WBcorr_B < 0.99))
-                if (color_palette == palette_rgb)
-                    if (focusing_flag == 0)
-                        WB_correction(final_image, WBcorr_R, WBcorr_G, WBcorr_B);
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 37ms!!!  11ms/18ms
-
-
-            // color correction matrix
-            if ( (color_correction_flag == 1) && (color_palette == palette_rgb) )
-                color_correction(final_image);
-            /**/
 
             // Stretch
-                //double t = (double)getTickCount();
             gamma_correction(final_image, gamma);
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 215ms!!!   34ms/46ms
             
+            if ((state == foto_state) && (highlight_protection_flag == 1))
+                gamma_dark_correction(dark_image, 1.0);   // for using as darker image for highlight protection
+
             // Black level
             /*
             if (background_comp_flag == 1)
@@ -3310,16 +3764,38 @@ int main(int argc, char* argv[])
             else if (background_comp_flag == 2)
                 black_level_gradient(final_image, black_level_value);
             /**/
-            black_level(final_image, black_level_value);
-            //-----------------------
+
+            if (state == video_state)
+                black_level(final_image, black_level_value_v);
+            else
+                black_level(final_image, black_level_value_f);
+
+            if ((state == foto_state) && (highlight_protection_flag == 1))
+                black_level(dark_image, black_level_value_f);   // for using as darker image for highlight protection
+ 
 
 
             // highlight protection
             if ((state == foto_state) && (highlight_protection_flag == 1))
-                highlight_protection(final_image);
+                highlight_protection(final_image, dark_image);
 
 
-                //cout << "after stretch/black in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
+
+
+
+#if AI_NOISEREDUCTION
+            // here place for NN noise reduction ??
+            
+            if ((state == foto_state) && (AI_noise_factor > 0.01) && (frames_stacked > AI_noise_frames)) {
+                if (AI_noise_factor > 0.99)
+                    NN_noise_reduction(model, final_image, 1.0);
+                else
+                    NN_noise_reduction(model, final_image, AI_noise_factor);
+            }
+            //}
+#endif /* AI_NOISEREDUCTION */
+
+
 
              // show circular mask for background compensation
             if ((circular_mask_background_flag == 1) && (circular_mask_background_show == 1)) {
@@ -3331,38 +3807,103 @@ int main(int argc, char* argv[])
             }
 
 
-            //Apply inverse flat
-            //if ((flat_flag == 1) && (flat_inv_factor > 0.001))
-            //    multiply(final_image, flat_32fc3 * flat_inv_factor, final_image);   // full removing of flat frame
+            // contrast enhancement
+            // TilesSize, ClipLimit, Amount
+            /**/
+            if ((state == foto_state) && ( (CLAHE_amount > 0.01) || (sharpen_amount > 0.01) )) {
+                cvtColor(final_image, final_image, COLOR_BGR2Lab);
+
+                Mat channels[3];
+                split(final_image, channels);
+
+                
+
+                if (CLAHE_amount > 0.01) {
+                    logfile << "CLAHE" << endl;
+
+                    Mat grayImage;
+
+                    channels[0].copyTo(grayImage);
+
+                    //imshow("gray", grayImage * 0.01);
+                    grayImage.convertTo(grayImage, CV_16UC1, 65535.0 / 100.0);
+
+                    Ptr<CLAHE> clahe = createCLAHE();
+                    clahe->setClipLimit(CLAHE_clip_limit);  // 2.0 //Set the clip limit to control the contrast enhancement
+                    clahe->setTilesGridSize(Size(CLAHE_tiles_size, CLAHE_tiles_size));  //8
+                    Mat enhancedImage;
+                    clahe->apply(grayImage, enhancedImage);
+                    //grayImage.copyTo(enhancedImage);
+
+                    enhancedImage.convertTo(enhancedImage, CV_32FC1, 100 / 65535.0);
+
+                    //imshow("enh", enhancedImage * 0.01);
+
+                    //enhancedImage.copyTo(channels[0]);
+                    channels[0] = channels[0] * (1.0 - CLAHE_amount) + enhancedImage * CLAHE_amount;
+                }
+
+                //GaussianBlur(channels[1], channels[1], Size(15, 15), 0);
+                //GaussianBlur(channels[2], channels[2], Size(15, 15), 0);
+
+                //bilateralFilter(channels[1], channels[1], 10, 200.0, 200.0);
+                //bilateralFilter(channels[2], channels[2], 10, 200.0, 200.0);
+
+                if (sharpen_amount > 0.01) {
+                    logfile << "sharpen" << endl;
+
+                    Mat blurred;
+                    
+                    GaussianBlur(channels[0], blurred, Size(), sharpen_sigma, sharpen_sigma);
+
+                    //imshow("blurred", blurred);
+
+                    Mat sharpened = channels[0] * (1 + sharpen_amount) - blurred * (sharpen_amount);
+
+                    //Mat lowContrastMask = abs(final_image - blurred) < threshold;
+                    //imshow("mask", lowContrastMask);
+
+                    //sharpened.copyTo(final_image, lowContrastMask);
+                    sharpened.copyTo(channels[0]);
+                }
 
 
-            //show_histogram(final_image);
+                merge(channels, 3, final_image);
+
+                cvtColor(final_image, final_image, COLOR_Lab2BGR);
+            }
+            /**/
 
 
-#if AI_NOISEREDUCTION
-            // here place for NN noise reduction ??
-            
-            if ((state == foto_state) && (AI_noise_flag == 1) && (frames_stacked > AI_noise_frames) ) 
-                NN_noise_reduction(model, final_image, 1.0);
-            //}
-#endif /* AI_NOISEREDUCTION */
+            /*
+            // sharpen
+            // sharpen image using "unsharp mask" algorithm
+            // without is mostly better
+            if ((state == foto_state) && (sharpen_amount > 0.01)) {
+                Mat blurred; 
+                //double sharpen_sigma = 2, sharpen_amount = 0.5; // , threshold = 0.02;
+                GaussianBlur(final_image, blurred, Size(), sharpen_sigma, sharpen_sigma);
+
+                //imshow("blurred", blurred);
+
+                Mat sharpened = final_image * (1 + sharpen_amount) - blurred * (sharpen_amount);
+
+                //Mat lowContrastMask = abs(final_image - blurred) < threshold;
+                //imshow("mask", lowContrastMask);
+
+                //sharpened.copyTo(final_image, lowContrastMask);
+                sharpened.copyTo(final_image);
+            }
+            /**/
 
 
 
 
 
             //Flip / rotate
-                //double t = (double)getTickCount();
             rotate_image(final_image, image_rotation, image_flip);
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 16ms!!!
 
-            // Dualband palette
-            /*
-                //double t = (double)getTickCount();
-            if ( (color_palette == palette_duo) && (focusing_flag == 0))
-                dualband_colors(final_image);
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 86ms!!!   11/15ms
-            /**/
+
 
 
 
@@ -3370,46 +3911,16 @@ int main(int argc, char* argv[])
             if (display_zoom_value > 1.01) {
                 zoom_in(final_image, display_zoom_value);
             }
-            //cout << final_image.rows << " " << final_image.cols << endl;
-            
-
-            // Saturation correction, only for RGB images
-            /*
-            if ((color_palette == palette_rgb) && (focusing_flag == 0)) {
-
-                cvtColor(final_image, final_image, COLOR_BGR2HSV);
-
-                Mat HSVChannels[3];
-                split(final_image, HSVChannels);
-
-                GaussianBlur(HSVChannels[1], HSVChannels[1], Size(15, 15), 0);
-                HSVChannels[1] = max(HSVChannels[1], 0.0);
-                HSVChannels[1] = min(HSVChannels[1], 1.0);
-
-                //GaussianBlur(HSVChannels[0], HSVChannels[0], Size(5, 5), 0);
-                //HSVChannels[0] = max(HSVChannels[0], 0.0);
-                //HSVChannels[0] = min(HSVChannels[0], 1.0);
-
-                //imshow("saturation", HSVChannels[1]);
-
-                HSVChannels[1] *= 2;
-
-                
-                merge(HSVChannels, 3, final_image);
-
-                cvtColor(final_image, final_image, COLOR_HSV2BGR);
-            } /**/
+           
 
 
             Mat final_image2;
             final_image.copyTo(final_image2);
 
             //Crop to square, if needed
-                //double t = (double)getTickCount();
             if (circular_mask_flag == 1) {
                 square_image(final_image2); //crop to square
             }
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 19ms!!!
 
             //Focusing zoom
             if (focusing_flag == 1)
@@ -3417,25 +3928,19 @@ int main(int argc, char* argv[])
 
 
             // Resize image for display
-                //double t = (double)getTickCount();
-            //cout << display_height << endl;
             double display_scale = (float)display_height / final_image2.rows;
+
             if (display_scale < 0.99)
                 resize(final_image2, display_image, Size(0, 0), display_scale, display_scale, INTER_AREA);
             else if (display_scale > 1.01)
                 resize(final_image2, display_image, Size(0, 0), display_scale, display_scale, INTER_CUBIC);
             else final_image2.copyTo(display_image);
-            //cout << display_image.rows << " " << display_image.cols << endl;
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 8ms
+
             
 
-
-
-            //show_histogram(display_image);
 
             
             // Noise reduction
-                //double t = (double)getTickCount();
             if (noise_reduction_flag == 1) {
 
                 if (debug_flag == 1) {
@@ -3451,39 +3956,18 @@ int main(int argc, char* argv[])
                 //int max_frames = 5;
                 if ((state == video_state) && (s_v > 0)) {
                     bilateralFilter(display_image2, display_image, s_v, 200.0, 200.0);
-                    //cout << round(d * filter_strength_2) << endl;
                 }
                 if ((state == foto_state) && (s_f > 0)) {
                     bilateralFilter(display_image2, display_image, s_f, 200.0, 200.0);;
-                    //cout << round(d * filter_strength_1) << endl;
                 }
 
             }
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 15ms
-
-            /*
-            // Noise reduction exp
-            Mat display_image2;
-            display_image.copyTo(display_image2);
-            display_image2.convertTo(display_image2, CV_8UC3, 255.0);
-            fastNlMeansDenoisingColored(display_image2, display_image2, 5, 10, 7, 21);
-            display_image2.convertTo(display_image, CV_32FC3, 1 / 255.0);
-            //dctDenoising();
-            //imshow("Display filtered", display_image2);
-            /**/
 
 
-            
-#if AI_NOISEREDUCTION
-            // here place for NN noise reduction ??
-            //if (state == foto_state) {
-            //    NN_noise_reduction(model, display_image, 1.0);
-            //}
-#endif /* AI_NOISEREDUCTION */
+
 
             
             //Apply circular mask
-                //double t = (double)getTickCount();
             if (circular_mask_flag == 1) {
                 
                 //square_image(display_image); //crop to square
@@ -3494,11 +3978,6 @@ int main(int argc, char* argv[])
                 
                 multiply(display_image, circular_mask, display_image);
             }
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 12ms
-
-                //cout << "before imshow in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
-
-                //double t = (double)getTickCount();
             
            
 
@@ -3506,10 +3985,15 @@ int main(int argc, char* argv[])
 
             
             // check if RAW histogram should be shown
-            if (hist_show_state == 1)
+            if (hist_show_state == 1) {
+                {
+                    lock_guard<mutex> lock(RAW_image_mutex);
+                    RAW_image = shared_RAW_image.clone();
+                }
                 plot_RAW_histogram(display_image, RAW_image);
+            }
             
-            namedWindow("Display window");
+            //namedWindow("Display window");
 
             if (GUI_flag == 1) {
                 setMouseCallback("Display window", onMouse, &buttons);
@@ -3519,19 +4003,7 @@ int main(int argc, char* argv[])
             else
                 imshow("Display window", display_image);
 
-            //setWindowProperty("Display window", WND_PROP_TOPMOST, 1);
 
-
-            //imshow("Display window", display_image);
-
-
-                //t = ((double)getTickCount() - t) / getTickFrequency() * 1000.0; cout << "Times passed in ms: " << t << endl;  // 3ms
-
-            //hwnd = (HWND)FindWindow(NULL, L"Display window");
-
-
-
-                //cout << "after imshow in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
 
 
 
@@ -3556,7 +4028,6 @@ int main(int argc, char* argv[])
                     eyepiece_image_size_pixels = eyepiece_image_radius_pixels * 2;
                 }
 
-                //cout << image_radius_pixels_1 << endl; cout << image_radius_pixels_2 << endl; cout << image_radius_pixels_3 << endl;
 
                 Mat final_image_eyepiece;
                 final_image.copyTo(final_image_eyepiece);
@@ -3593,11 +4064,13 @@ int main(int argc, char* argv[])
                 }/**/
 
                 //Apply circular mask
-                Mat circular_mask = Mat::zeros(final_image_eyepiece.rows, final_image_eyepiece.cols, CV_32FC3);
-                circle(circular_mask, Point(circular_mask.cols / 2, circular_mask.rows / 2), round(circular_mask.rows * 0.49), Scalar(1, 1, 1), FILLED, LINE_AA);
-                blur(circular_mask, circular_mask, Size(round(circular_mask.rows * 0.02), round(circular_mask.rows * 0.02)));
+                if (circular_mask_eyepiece_flag == 1) {
+                    Mat circular_mask = Mat::zeros(final_image_eyepiece.rows, final_image_eyepiece.cols, CV_32FC3);
+                    circle(circular_mask, Point(circular_mask.cols / 2, circular_mask.rows / 2), round(circular_mask.rows * 0.49), Scalar(1, 1, 1), FILLED, LINE_AA);
+                    blur(circular_mask, circular_mask, Size(round(circular_mask.rows * 0.02), round(circular_mask.rows * 0.02)));
 
-                multiply(final_image_eyepiece, circular_mask, final_image_eyepiece);
+                    multiply(final_image_eyepiece, circular_mask, final_image_eyepiece);
+                }
 
                 //Black base image
                 Mat eyepiece_image(eyepiece_display_Y_pixels, eyepiece_display_X_pixels, CV_32FC3, Scalar(0, 0, 0));
@@ -3628,6 +4101,9 @@ int main(int argc, char* argv[])
 
                 //Mat img_test = imread("C:/Users/HOME/Desktop/stacks_test/stack_2024-03-08_21-46-02.tiff", IMREAD_UNCHANGED);
                 imshow("Eyepiece", eyepiece_image);
+
+                // protection from locking main screen without connected eyepiece screen
+                setMouseCallback("Eyepiece", onMouse_Eyepiece);
             }
 
 
@@ -3636,63 +4112,30 @@ int main(int argc, char* argv[])
 
 
             // cycle time and fps measurement
-            t_cycle_old = t_cycle;
-            t_cycle = (double)getTickCount();
-            t_delta = (t_cycle - t_cycle_old) / getTickFrequency();
+            //t_cycle_old = t_cycle;
+            //t_cycle = (double)getTickCount();
+            //t_delta = (t_cycle - t_cycle_old) / getTickFrequency();
             //cout << "Cycle time in ms: " << t_delta * 1000.0 << "  " << "FPS: " << 1 / t_delta << endl;
        
         }
+        else
+            this_thread::sleep_for(chrono::milliseconds(50));
 
-        else if ( (old_state == foto_state) && (state == video_state) ) {  // change to video mode
-            if (exposure_time_v < exposure_threshold) {  //video mode
-                stop_exposure();
-                set_camera_controls();
-                start_video();
-                get_video_frame(); // dummy frame
-            }
-            else {                            // single exposure mode
-                stop_exposure();
-                set_camera_controls();
-                start_exposure();
-                frames_stacked = 0;
-            }
-        }
-        else if ( (old_state == video_state) && (state == foto_state) ) {  // change to long exposure mode
-            if (exposure_time_v < exposure_threshold) {  //video mode
-                stop_video();
-                set_camera_controls();
-                start_exposure();
-                frames_stacked = 0;
-            }
-            else {                             // single exposure mode
-                stop_exposure();
-                set_camera_controls();
-                start_exposure();
-                frames_stacked = 0;
-            }
-        }
 
-        
-       
-        
 
         key = waitKey(1); // Wait for a keystroke in the window
-        //key = pollKey(); 
-        //cout << key << endl;
-        /*
-        if (key != -1) {
-            printf("key: %d\n", key);   
-        }  /**/
 
 
-
-        // update old state machine state
-        old_state = state;
-
-            //cout << "after waitKey in ms: " << ((double)getTickCount() - t) / getTickFrequency() * 1000.0 << endl;
 
     }
     
+
+    // Stopping programm
+
+    // stopping acquisition and pre-processing thread
+    capture_running = false;
+    acqThread.join();
+
     if (state == foto_state)
         stop_exposure();
 
@@ -3701,6 +4144,7 @@ int main(int argc, char* argv[])
             stop_video();
         else
             stop_exposure();
+
 
     close_camera();
 
@@ -3715,19 +4159,22 @@ int main(int argc, char* argv[])
 
 //TODO
 
-
-            // GUI from right
-            // 2x zoom button
+    
+            // switch config on-the-fly per key
+            // registration for stacking only in defined area            
+            // check all camera numbers, cam or 0?        
             // plate solve button
             // NN filter for linear image?
-            // ignore windows scale (dpi awarness)
-            // ROI variant?
             // black border, why colors there?
             // delete sattelite trails
             // Fourier after NN filter
+            // Check borders of NN filter
             // dark mean level as parameter
             // color noise reduction (gaus r=2-3 on color)
+            // thread priority?
 
+            // different gains for modes?
+            // changing gain / noise filtering during stacking?
             // correct black level search areas
             // change black level from histogram to blur+min? only for video? only for plane? (+ mask center)
             // WB tolerant for star colors?
@@ -3735,17 +4182,14 @@ int main(int argc, char* argv[])
             // cooler depending on properties?
             // WB_R/B depending on mono parameter?
             // alternative keys for mode, separate for foto and video mode (other functions?) (for ext controller)
-            // video stacking with afterglow - haha, good luck
             // mono support: hot pixel list, hot pixel correction
+            // full mono support
             // Check all parameters limits
-            // check all camera numbers, cam or 0?
-            // hot pixel detection without dark frame
             // find camera per name or number
             // picture shift - black borders
             // picture shift to last frame position?
             // limit number of stacked pictures?
             // camera reset, if something wrong?
-            // 8-bit video mode?
             // banding filter median filter?
             // faster video? - how?
 
@@ -3761,3 +4205,17 @@ int main(int argc, char* argv[])
 // - added optional screen GUI buttons
 // - add AI noise reduction
 // - optimized banding filter
+
+// V0.3
+// - added alternative zoom function to focus zoom button
+// - added automatic saving of pictures
+// - added black screen mode, acitivated with mouse click on image
+// - added control of highlights part of stretching curve - star protection factor
+// - added control of mixing original and AI noise filtered image
+// - added correct DPI awareness mode 
+
+// V0.4
+// - added separate threads for camera frame acquisition and pre-processing
+// - added hot pixel detection without dark frame
+// - corrected bug, working with some image sizes
+// - updated ASI SDK

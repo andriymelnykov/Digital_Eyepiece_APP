@@ -1,4 +1,4 @@
-// Copyright 2024, Andriy Melnykov
+// Copyright 2025, Andriy Melnykov
 // https://github.com/andriymelnykov/Digital_Eyepiece_APP
 // Distributed under the MIT License.
 // (See accompanying LICENSE file or at
@@ -22,12 +22,17 @@
 #define camera_from_file 0  //0 - ASI camera, 1 - image from fits file
 #define stack_from_file  0  //0 - ASI camera or fits file, 1 - stack image from saved tiff file
 
+#define save_subs  0        //0 - nothing, 1 - save calibrated and registered subs to tiff file
+
 
 extern long image_size; // , image_size_v, image_size_f;
 
 extern std::ofstream logfile;
 
 extern int debug_flag;
+
+extern int auto_save_pictures;
+extern int auto_save_pictures_n;
 
 extern long exposure_time, exposure_time_v, exposure_time_f;
 extern long gain, gain_v, gain_f;
@@ -36,6 +41,7 @@ extern long WB_B, WB_B_v, WB_B_f;
 extern long offset, offset_v, offset_f;
 extern int highspeed_v;
 extern long bandwidth; // , bandwidth_v, bandwidth_f;
+extern int ROI_zoom;
 extern long monobin; // , monobin_v, monobin_f;
 extern int banding_filter_flag;
 extern int banding_filter_strength;
@@ -47,6 +53,7 @@ extern int image_flip;
 extern int image_rotation;
 extern int dark_v_hotpixel_flag, dark_v_subtract_flag;
 extern int dark_f_hotpixel_flag, dark_f_subtract_flag;
+extern int add_hotpixel_flag_f;
 extern int flat_v_flag, flat_f_flag;
 extern char dark_v_filename[80], dark_f_filename[80], flat_filename[80];
 extern float flat_inv_factor;
@@ -55,7 +62,13 @@ extern int display_height;
 extern int background_comp_flag, noise_reduction_flag;
 extern float filter_strength_1;
 extern float filter_strength_2;
-extern float black_level_value;
+extern int CLAHE_tiles_size;
+extern float CLAHE_clip_limit;
+extern float CLAHE_amount;
+extern float sharpen_sigma;
+extern float sharpen_amount;
+extern float black_level_value_v;
+extern float black_level_value_f;
 extern int circular_mask_background_flag;
 extern float circular_mask_background_size;
 extern int circular_mask_background_show;
@@ -65,6 +78,7 @@ extern int star_blob_radius;
 extern float star_blob_strength;
 extern int highlight_protection_flag;
 extern float init_gamma;
+extern float star_protection_factor;
 extern float WBcorr_R, WBcorr_G, WBcorr_B;
 
 extern int color_correction_flag;
@@ -76,7 +90,7 @@ extern float aR, bR, cR;  //dual band colors for R
 extern float aG, bG, cG;  //dual band colors for G
 extern float aB, bB, cB;  //dual band colors for B
 extern double focusing_zoom_value;
-extern double display_zoom_value;
+extern double display_zoom_value, display_zoom_value_stored;
 extern int key_exit;       //(int)'x'   // exit
 extern int key_mode;       //(int)'m'   //mode change foto, video
 extern int key_plus;       //(int)'+'   //gain +
@@ -88,9 +102,10 @@ extern int key_histogram;   //(int)'h'   //show histogram
 
 extern int GUI_flag;
 
-extern int AI_noise_flag;
+extern float AI_noise_factor;
 extern int AI_noise_frames;
 extern char AI_noise_model_filename[80];
+extern int AI_num_threads;
 
 extern int eyepiece_display_flag;
 extern int eyepiece_display_X_pixels;
@@ -101,6 +116,7 @@ extern float interpupillary_distance_mm;
 extern int eyepiece_display_rotation;
 extern int second_display_X;
 extern int second_display_Y;
+extern int circular_mask_eyepiece_flag;
 
 
 extern int asi_connected_cameras;
@@ -115,6 +131,7 @@ extern int camera_image_width, camera_image_height;
 extern int cam;
 extern int key;
 extern int monobin_k; // , monobin_k_v, monobin_k_f;
+extern int ROI_zoom_k;
 
 extern int state;
 extern int old_state;
