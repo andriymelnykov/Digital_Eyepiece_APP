@@ -53,12 +53,11 @@ namespace fs = std::filesystem;
 #include "opencv2/reg/mappergradeuclid.hpp"
 #include "opencv2/reg/mapperpyramid.hpp"
 
+#include "pop_effect.hpp"
 
-#define AI_NOISEREDUCTION true // if true, AI noise reducition code included
 
-#if AI_NOISEREDUCTION
 #include "fdeep/fdeep.hpp"
-#endif /* AI_NOISEREDUCTION */
+
 
 
 using namespace std;
@@ -67,7 +66,8 @@ using namespace reg;
 
 long image_size; // , image_size_v, image_size_f;
 
-#define exposure_threshold 500  //100000   //50000 //in µs, threshold for video mode switching
+//#define exposure_threshold 500  //100000   //50000 //in µs, threshold for video mode switching
+bool use_video_mode = false; // defines, if video or single exposure mode used
 
 ofstream logfile, picfile;    //logfile with debug information, picfile with saved picture information
 
@@ -83,10 +83,12 @@ double t_delta;
 long exposure_time, exposure_time_v, exposure_time_f;
 long gain, gain_v, gain_f;
 long WB_R, WB_R_v, WB_R_f;
+long WB_G, WB_G_v, WB_G_f;
 long WB_B, WB_B_v, WB_B_f;
 long offset, offset_v, offset_f;
 int highspeed_v;
 long bandwidth; // , bandwidth_v, bandwidth_f;
+float hot_pixel_sigma;
 int ROI_zoom;
 long monobin; // , monobin_v, monobin_f;
 int banding_filter_flag;
@@ -110,13 +112,14 @@ int display_height;
 int background_comp_flag, noise_reduction_flag;
 float filter_strength_1;
 float filter_strength_2;
-int CLAHE_tiles_size;
-float CLAHE_clip_limit;
-float CLAHE_amount;
+int midtone_radius;
+float midtone_width;
+float midtone_strength;
 float sharpen_sigma;
 float sharpen_amount;
 float black_level_value_v;
 float black_level_value_f;
+float black_point_offset;
 int circular_mask_background_flag;
 float circular_mask_background_size;
 int circular_mask_background_show;
@@ -124,7 +127,7 @@ int circular_mask_flag;
 int enhance_stars_flag;
 int star_blob_radius;
 float star_blob_strength;
-int highlight_protection_flag;
+float highlight_protection_par;
 float init_gamma;
 float star_protection_factor;
 float WBcorr_R, WBcorr_G, WBcorr_B;
@@ -137,12 +140,19 @@ float CC31, CC32, CC33;
 float aR, bR, cR;  //dual band colors for R
 float aG, bG, cG;  //dual band colors for G
 float aB, bB, cB;  //dual band colors for B
-double focusing_zoom_value;
+double focusing_zoom_value, zoom_value;
 double display_zoom_value, display_zoom_value_stored;
 
+int main_display_flag;
 int GUI_flag;
+int show_clock_flag;
+int special_setup_01;  // special setup without main screen
 
 float AI_noise_factor;
+float AI_noise_min;
+float AI_noise_max;
+float AI_noise_factor_min;
+float AI_noise_factor_max;
 int AI_noise_frames;
 char AI_noise_model_filename[80];
 int AI_num_threads;
@@ -161,6 +171,12 @@ int circular_mask_eyepiece_flag;
 
 int focusing_flag;
 
+bool is_color_cam;
+int bayer_pattern;
+//BAYER_RG = 0,
+//BAYER_BG,
+//BAYER_GR,
+//BAYER_GB
 
 int asi_connected_cameras;
 int asi_num_controls;
@@ -169,6 +185,13 @@ ASI_CONTROL_CAPS** asi_control_caps;
 unsigned char* asi_image;
 //ASI_EXPOSURE_STATUS asi_exp_status;
 int camera_image_width, camera_image_height;
+
+int svb_connected_cameras;
+int svb_num_controls;
+SVB_CAMERA_INFO** svb_camera_info;
+SVB_CAMERA_PROPERTY** svb_camera_property;
+SVB_CONTROL_CAPS** svb_control_caps;
+//extern int svb_cameraID_array[20];
 
 
 unsigned char* dark_v_image;
@@ -205,11 +228,16 @@ float gamma;
 float gamma_dark;
 //#define LUT_size 1000
 #define LUT_size 65536
+#define LUT_size_noise 200000
 float LUT_in[LUT_size];
 float LUT_out[LUT_size];
 float LUT_max_y;
 float LUT_dark_out[LUT_size];  // this LUT for highlight protection algorithm
 float LUT_dark_max_y;
+float LUT_noise_in[LUT_size_noise];
+float LUT_noise_out[LUT_size_noise];  // this LUT for noise filtering thread
+float LUT_noise_inv[LUT_size_noise];  // this LUT for noise filtering thread
+float LUT_noise_max_y;
 
 
 Mat RAW_image;    // direct from camera, copy for histogram plot
@@ -223,6 +251,10 @@ Mat first_image_acq; // first image in for stacking, used in acquisition thread
 Mat display_image;  // resized image for display
 Ptr<Map> mapPtr; //current affine map, used for image registration
 Ptr<Map> mapPtr_old; //previos affine map, used as initial estimation for next image registration
+
+Mat final_image_eyepiece; // single image for eyepiece, before integration in single/double eyepiece image
+
+Mat sub_base_image;  // dataset generation mode: single image for backgroung compensation calculation
 
 //Control keys
 /*
@@ -253,13 +285,18 @@ int key_histogram;   //(int)'h'   //show histogram
 // Global shared frames and synchronization primitives
 Mat shared_stack_image;
 Mat shared_RAW_image;
+Mat shared_filtered_image;
 mutex stack_image_mutex;
 mutex RAW_image_mutex;
+mutex filt_image_mutex;
 atomic<bool> new_frame_available(false);
+atomic<bool> new_filt_frame_available(false);
 atomic<bool> capture_running(true);
 atomic<bool> mode_change(false);
+atomic<bool> palette_change(false);
+atomic<bool> prohibit_new_frame(true);
 
-
+Mat mask;
 
 
 //---------------- GUI
@@ -453,17 +490,14 @@ void compute_LUT(float gamma) {
     else
         gamma_dark = 0.118 * gamma + 3.235;
 
-    //gamma_dark = gamma_dark / star_protection_factor;
-
-    //gamma_dark = gamma / 10;
-
 
     //cout << "gamma: " << gamma << " " << gamma_dark << endl;
 
     LUT_max_y = atan(gamma);
-    //LUT_dark_max_y = atan(tan(1.0 * LUT_max_y) / gamma * gamma_dark);
-    LUT_dark_max_y = atan(gamma_dark);
     //LUT_max_y = asinh(gamma);
+
+    LUT_dark_max_y = atan(gamma_dark);
+
     for (int i = 0; i < LUT_size; i++) {
         LUT_in[i] = i / (float)(LUT_size);
 
@@ -478,29 +512,28 @@ void compute_LUT(float gamma) {
 
 
         // more realistic, more liniear stars
-        //LUT_out[i] = (atan(LUT_in[i] * gamma) / LUT_max_y * 0.7) + (LUT_in[i] * 0.3);
-        LUT_out[i] = (atan(LUT_in[i] * gamma) / LUT_max_y * star_protection_factor) + (sqrt(LUT_in[i]) * (1-star_protection_factor));
+        //LUT_out[i] = (atan(LUT_in[i] * gamma) / LUT_max_y * star_protection_factor) + (LUT_in[i] * (1 - star_protection_factor));
 
-        LUT_dark_out[i] = (atan(LUT_in[i] * gamma_dark) / LUT_dark_max_y * star_protection_factor) + (sqrt(LUT_in[i]) * (1 - star_protection_factor));
+        ////LUT_out[i] = (atan(LUT_in[i] * gamma) / LUT_max_y * star_protection_factor) + (sqrt(LUT_in[i]) * (1-star_protection_factor));
+        //LUT_out[i] = (atan(LUT_in[i] * gamma) / LUT_max_y * star_protection_factor) + (atan(LUT_in[i] * 3) / atan(3) * (1 - star_protection_factor));
+        ////LUT_dark_out[i] = (atan(LUT_in[i] * gamma_dark) / LUT_dark_max_y * star_protection_factor) + (sqrt(LUT_in[i]) * (1 - star_protection_factor));
+
+        float m = 10;
+        float a = 9 / 4 / m / m;
+        float c = 4 * m * m * m / 27;
+        float f;
+        if (LUT_in[i] < a)
+            f = m * LUT_in[i] - c * LUT_in[i] * LUT_in[i];
+        else
+            f = sqrt(LUT_in[i]);
+
+        LUT_out[i] = (atan(LUT_in[i] * gamma) / LUT_max_y * star_protection_factor) + (f * (1 - star_protection_factor));
+        LUT_dark_out[i] = (atan(LUT_in[i] * gamma_dark) / LUT_dark_max_y * star_protection_factor) + (f * (1 - star_protection_factor));
 
 
-
-
-
-        //LUT_dark_out[i] = atan(LUT_in[i] * gamma_dark) / LUT_dark_max_y;
         //LUT_out[i] = asinh(LUT_in[i] * gamma) / LUT_max_y;
         //LUT_out[i] = LUT_in[i];  // no stretch
         //LUT_out[i] = gamma * LUT_in[i];  // simple liniear
-
-        //sRGB gamma
-        /*
-        if (LUT_out[i] < 0.0031308)
-            LUT_out[i] = 12.92 * LUT_out[i];
-        else
-            LUT_out[i] = 1.055 * pow(LUT_out[i], (1 / 2.4))  - 0.055;  /**/
-        
-        //LUT_out[i] = LUT_out[i] * 2;
-        //LUT_out[i] = asinh(LUT_out[i] * gamma) / LUT_max_y;
 
     }
     
@@ -512,17 +545,83 @@ void compute_LUT(float gamma) {
     
     for (int i = 1; i < LUT_size; i++)
     {
+        //line(LUTImage, Point(0,250), Point(500, 250),  Scalar(128), 1, 8, 0);
+        //line(LUTImage, Point(250, 0), Point(250, 500), Scalar(128), 1, 8, 0);
         line(LUTImage, Point(cvRound(500 * LUT_in[i - 1]), cvRound(500 - 500*LUT_out[i - 1])),
                        Point(cvRound(500 * LUT_in[i]), cvRound(500 - 500 * LUT_out[i])),
                        Scalar(255), 1, 8, 0);
-        //line(LUTImage, Point(cvRound(500 * LUT_in[i - 1]), cvRound(500 - 500 * LUT_dark_out[i - 1])),
-        //    Point(cvRound(500 * LUT_in[i]), cvRound(500 - 500 * LUT_dark_out[i])),
-        //    Scalar(255), 1, 8, 0);
+        line(LUTImage, Point(cvRound(500 * LUT_in[i - 1]), cvRound(500 - 500 * LUT_dark_out[i - 1])),
+            Point(cvRound(500 * LUT_in[i]), cvRound(500 - 500 * LUT_dark_out[i])),
+            Scalar(128), 1, 8, 0);
         
     }
     imshow("LUT", LUTImage);
     /**/
 }
+
+
+void compute_LUT_noise(float gamma_n) {
+
+    if (debug_flag == 1) {
+        cout << "Computing LUT for noise filter" << endl;
+        logfile << "Computing LUT for noise filter" << endl;
+    }
+
+    LUT_noise_max_y = atan(gamma_n);
+
+    for (int i = 0; i < LUT_size_noise; i++) {
+        LUT_noise_in[i] = i / (float)(LUT_size_noise);
+
+        //LUT_noise_out[i] = atan(LUT_noise_in[i] * gamma_n) / LUT_noise_max_y;
+
+        //LUT_noise_inv[i] = tan(LUT_noise_in[i] * LUT_noise_max_y) / gamma_n;
+
+        float m = 10;
+        float a = 9 / 4 / m / m;
+        float c = 4 * m * m * m / 27;
+        float f;
+        if (LUT_noise_in[i] < a)
+            f = m * LUT_noise_in[i] - c * LUT_noise_in[i] * LUT_noise_in[i];
+        else
+            f = sqrt(LUT_noise_in[i]);
+
+        LUT_noise_out[i] = (atan(LUT_noise_in[i] * gamma_n) / LUT_noise_max_y * star_protection_factor) + (f * (1 - star_protection_factor));
+
+    }
+
+    // Sweep once to build inverse by linear interpolation
+    int i = 0; // index into forward LUT
+    for (int j = 0; j < LUT_size_noise; ++j) {
+        float y = j / (float)LUT_size_noise;
+
+        // Advance i until LUT_out[i] <= y <= LUT_out[i+1]
+        while (i + 1 < LUT_size_noise && LUT_noise_out[i + 1] < y) {
+            ++i;
+        }
+
+        if (i + 1 >= LUT_size_noise) {
+            // y is at/above the last sample (numerical edge)
+            LUT_noise_inv[j] = LUT_noise_in[LUT_size_noise - 1];
+            continue;
+        }
+
+        float y0 = LUT_noise_out[i];
+        float y1 = LUT_noise_out[i + 1];
+        float x0 = LUT_noise_in[i];
+        float x1 = LUT_noise_in[i + 1];
+
+        // Protect against division by zero in flat segments
+        float denom = (y1 - y0);
+        float t = (denom > 1e-12f) ? (y - y0) / denom : 0.0f;
+
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+
+        LUT_noise_inv[j] = x0 + t * (x1 - x0);
+    }
+}
+
+
 
 
 
@@ -568,6 +667,7 @@ float LookUpTable(float x, float LookUp_in[], float LookUp_out[], unsigned int L
     // fast without linear interpolation
     /**/
     float index = x * (LookUp_length - 1);
+    //float index = x/2 * (LookUp_length - 1);
 
     int indexLower = static_cast<unsigned int>(index);
 
@@ -890,6 +990,105 @@ void gamma_dark_correction(Mat& image, float gamma) {
 
 
 
+void gamma_noise_correction(Mat& image, float gamma) {
+    // Gamma correction
+    //image = 0.1 * image;
+
+
+
+    /**/
+    if (debug_flag == 1) {
+        cout << "Apply noise stretch" << endl;
+        logfile << "Apply noise stretch" << endl;
+    }
+
+    if (image.isContinuous()) // check, if gaps in memory
+    {
+        // using point arithmetics
+        int channels = image.channels();
+        int nrows = image.rows;
+        int ncols = image.cols * channels;
+
+        //cout << "continuous" << endl;
+        float* p = (float*)image.data;
+        for (unsigned int i = 0; i < ncols * nrows; ++i) {
+            //*p++ = LookUpTable(*p, LUT_noise_in, LUT_noise_out, LUT_size_noise);
+
+            float index = *p * (LUT_size_noise - 1);
+
+            int indexLower = static_cast<unsigned int>(index);
+
+            if (indexLower < 0) *p = LUT_noise_out[0];
+            else if (indexLower >= LUT_size_noise) *p = LUT_noise_out[LUT_size_noise - 1];
+            else *p = (1.0 * LUT_noise_out[indexLower]);
+
+            p++;
+        }
+    }
+    else {
+        // using iterators - safe, if gaps in memory
+        MatIterator_<Vec3f> it, end;
+        for (it = image.begin<Vec3f>(), end = image.end<Vec3f>(); it != end; ++it)
+        {
+            (*it)[0] = LookUpTable((*it)[0], LUT_noise_in, LUT_noise_out, LUT_size_noise);
+            (*it)[1] = LookUpTable((*it)[1], LUT_noise_in, LUT_noise_out, LUT_size_noise);
+            (*it)[2] = LookUpTable((*it)[2], LUT_noise_in, LUT_noise_out, LUT_size_noise);
+        }
+    }
+    /**/
+}
+
+void gamma_noise_inv_correction(Mat& image, float gamma) {
+    // Gamma correction
+    //image = 0.1 * image;
+
+
+
+    /**/
+    if (debug_flag == 1) {
+        cout << "Apply noise inv stretch" << endl;
+        logfile << "Apply noise inv stretch" << endl;
+    }
+
+    if (image.isContinuous()) // check, if gaps in memory
+    {
+        // using point arithmetics
+        int channels = image.channels();
+        int nrows = image.rows;
+        int ncols = image.cols * channels;
+
+        //cout << "continuous" << endl;
+        float* p = (float*)image.data;
+        for (unsigned int i = 0; i < ncols * nrows; ++i) {
+            //*p++ = LookUpTable(*p, LUT_noise_in, LUT_noise_out, LUT_size_noise);
+
+            float index = *p * (LUT_size_noise - 1);
+
+            int indexLower = static_cast<unsigned int>(index);
+
+            if (indexLower < 0) *p = LUT_noise_inv[0];
+            else if (indexLower >= LUT_size_noise) *p = LUT_noise_inv[LUT_size_noise - 1];
+            else *p = (1.0 * LUT_noise_inv[indexLower]);
+
+            p++;
+        }
+    }
+    else {
+        // using iterators - safe, if gaps in memory
+        MatIterator_<Vec3f> it, end;
+        for (it = image.begin<Vec3f>(), end = image.end<Vec3f>(); it != end; ++it)
+        {
+            (*it)[0] = LookUpTable((*it)[0], LUT_noise_in, LUT_noise_inv, LUT_size_noise);
+            (*it)[1] = LookUpTable((*it)[1], LUT_noise_in, LUT_noise_inv, LUT_size_noise);
+            (*it)[2] = LookUpTable((*it)[2], LUT_noise_in, LUT_noise_inv, LUT_size_noise);
+        }
+    }
+    /**/
+}
+
+
+
+
 
 void black_level(Mat& image, float b_level) {
     
@@ -903,7 +1102,11 @@ void black_level(Mat& image, float b_level) {
     Mat image2;
     //image.copyTo(image2);
     double resize_factor = 300.0 / image.rows;
-    resize(image, image2, Size(0, 0), resize_factor, resize_factor, INTER_AREA);
+
+    if ((stack_from_file == 2) && (state == foto_state))  // special dataset generation mode
+        resize(sub_base_image, image2, Size(0, 0), resize_factor, resize_factor, INTER_AREA);
+    else
+        resize(image, image2, Size(0, 0), resize_factor, resize_factor, INTER_AREA);
 
     int sz = 3; //7;
     blur(image2, image2, Size(sz, sz));
@@ -1060,7 +1263,11 @@ void black_level_gradient(Mat& image, float b_level) {
     Mat image2;
     //image.copyTo(image2);
     double resize_factor = 500.0 / image.rows;    //300.0 / image.rows;
-    resize(image, image2, Size(0, 0), resize_factor, resize_factor, INTER_AREA);
+
+    if (stack_from_file == 2)  // special dataset generation mode
+        resize(sub_base_image, image2, Size(0, 0), resize_factor, resize_factor, INTER_AREA);
+    else
+        resize(image, image2, Size(0, 0), resize_factor, resize_factor, INTER_AREA);
 
     int sz = 3; //7;
     blur(image2, image2, Size(sz, sz));
@@ -1377,8 +1584,17 @@ void plot_RAW_histogram(Mat& display_image, Mat& RAW_image) {
     Mat hist;
     calcHist(&RAW_image, 1, 0, Mat(), hist, 1, &histSize, histRange, uniform, accumulate);
 
-    int hist_w = display_image.cols, hist_h = display_image.rows / 2;;
+    int hist_w, hist_h;
+
+    if (special_setup_01 == 1) {
+        hist_w = display_image.cols / 2; hist_h = display_image.rows / 2;
+    }
+    else {
+        hist_w = display_image.cols; hist_h = display_image.rows / 2;
+    }
+
     float bin_w = (float)hist_w / histSize;
+
 
     //Mat histImage(hist_h, hist_w, CV_8UC3, Scalar(0, 0, 0));
 
@@ -1388,12 +1604,25 @@ void plot_RAW_histogram(Mat& display_image, Mat& RAW_image) {
         //line(histImage, Point(cvRound(bin_w * (i - 1)), hist_h - cvRound(hist.at<float>(i - 1))),
         //    Point(cvRound(bin_w * (i)), hist_h - cvRound(hist.at<float>(i))),
         //    Scalar(0, 255, 0), 2, 8, 0);
-        line(display_image, Point(cvRound(bin_w * (i - 1)), display_image.rows - cvRound(hist.at<float>(i - 1))),
-            Point(cvRound(bin_w * (i)), display_image.rows - cvRound(hist.at<float>(i))),
-            Scalar(200, 200, 200), 2, 8, 0);
+
+        if (special_setup_01 == 1) {
+            line(display_image, Point(   display_image.cols / 4 + cvRound(bin_w * (i - 1)),    display_image.rows / 4 * 3 - cvRound(hist.at<float>(i - 1))),
+                                Point(   display_image.cols / 4 + cvRound(bin_w * (i)),        display_image.rows / 4 * 3 - cvRound(hist.at<float>(i))),
+                Scalar(200, 200, 200), 2, 8, 0);
+        }
+        else {
+            line(display_image, Point(   cvRound(bin_w * (i - 1)), display_image.rows - cvRound(hist.at<float>(i - 1))),
+                                Point(   cvRound(bin_w * (i)),     display_image.rows - cvRound(hist.at<float>(i))),
+                Scalar(200, 200, 200), 2, 8, 0);
+        }
     }
 
-    rectangle(display_image, Rect(0, display_image.rows - hist_h, hist_w, hist_h), Scalar(200, 200, 200), 2);
+    if (special_setup_01 == 1) {
+        rectangle(display_image, Rect(display_image.cols / 4, display_image.rows / 4 * 3 - hist_h, hist_w, hist_h), Scalar(200, 200, 200), 2);
+    }
+    else {
+        rectangle(display_image, Rect(0, display_image.rows - hist_h, hist_w, hist_h), Scalar(200, 200, 200), 2);
+    }
 }
 
 
@@ -1556,7 +1785,7 @@ void read_darks(Mat& dark_v_32sc1, double& dark_v_mean, Mat& dark_f_32sc1, doubl
         meanStdDev(dark_v_32sc1, mean, stddev);
         dark_v_mean = mean[0];
         dark_v_stdev = stddev[0];
-        hotpixel_threshold = dark_v_mean + dark_v_stdev * 7;
+        hotpixel_threshold = dark_v_mean + dark_v_stdev * hot_pixel_sigma; //7;
 
         if (debug_flag == 1) {
             cout << "Dark v mean value: " << dark_v_mean << endl;
@@ -1764,7 +1993,7 @@ void read_darks(Mat& dark_v_32sc1, double& dark_v_mean, Mat& dark_f_32sc1, doubl
         meanStdDev(dark_f_32sc1, mean, stddev);
         dark_f_mean = mean[0];
         dark_f_stdev = stddev[0];
-        hotpixel_threshold = dark_f_mean + dark_f_stdev * 7;
+        hotpixel_threshold = dark_f_mean + dark_f_stdev * hot_pixel_sigma; // 7;
 
         if (debug_flag == 1) {
             cout << "Dark f mean value: " << dark_f_mean << endl;
@@ -2241,7 +2470,7 @@ void read_flat(Mat& flat_32fc3, Mat& flat_inv_32fc3)
     
     // Decode Bayer data to RGB or mix monochrome to RGB
     Mat mat16uc3_rgb(camera_image_height, camera_image_width, CV_16UC3);
-    if (asi_camera_info[cam]->IsColorCam == ASI_TRUE)
+    if (is_color_cam)
         cvtColor(flat_16uc1, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
     else
         cvtColor(flat_16uc1, mat16uc3_rgb, cv::COLOR_GRAY2BGR);
@@ -2359,7 +2588,7 @@ void focusing_zoom(Mat& image, double zoom) {
 }
 
 
-#if AI_NOISEREDUCTION
+
 Mat NN_noise_reduction_tile(const fdeep::model& model, const Mat& image, const Mat& window2d) {
 
     // Split RGB parts of a tile
@@ -2474,7 +2703,7 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
 
     // prepeare window
     /**/
-    int N = 64; // Set the desired size for the window
+    int N = 128;   //64; // Set the desired size for the window
     Mat window1d(N, 1, CV_32F); // Create a 1D window matrix
     // Populate the 1D window using the Hanning window function
     /*
@@ -2511,9 +2740,9 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
     }
     /**/
     // Populate 1D window, overlap 7
-    /**/
+    /**
     for (int i = 0; i < N; i++) {
-        if (i == 0) window1d.at<float>(i, 0) = 0;
+        if      (i == 0) window1d.at<float>(i, 0) = 0;
         else if (i == 1) window1d.at<float>(i, 0) = 0;
         else if (i == 2) window1d.at<float>(i, 0) = 0.1;
         else if (i == 3) window1d.at<float>(i, 0) = 0.5;
@@ -2527,8 +2756,68 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
         else if (i == (N - 1)) window1d.at<float>(i, 0) = 0;
         else window1d.at<float>(i, 0) = 1.0;
 
-    }
+    } /**/
+
+    // Populate 1D window, overlap 10
+    /*
+    for (int i = 0; i < N; i++) {
+        if      (i == 0) window1d.at<float>(i, 0) = 0;
+        else if (i == 1) window1d.at<float>(i, 0) = 0;
+        else if (i == 2) window1d.at<float>(i, 0) = 0;
+        else if (i == 3) window1d.at<float>(i, 0) = 0.1;
+        else if (i == 4) window1d.at<float>(i, 0) = 0.2;
+        else if (i == 5) window1d.at<float>(i, 0) = 0.8;
+        else if (i == 6) window1d.at<float>(i, 0) = 0.9;
+        else if (i == 7) window1d.at<float>(i, 0) = 1.0;
+        else if (i == (N - 8)) window1d.at<float>(i, 0) = 1.0;
+        else if (i == (N - 7)) window1d.at<float>(i, 0) = 0.9;
+        else if (i == (N - 6)) window1d.at<float>(i, 0) = 0.8;
+        else if (i == (N - 5)) window1d.at<float>(i, 0) = 0.2;
+        else if (i == (N - 4)) window1d.at<float>(i, 0) = 0.1;
+        else if (i == (N - 3)) window1d.at<float>(i, 0) = 0;
+        else if (i == (N - 2)) window1d.at<float>(i, 0) = 0;
+        else if (i == (N - 1)) window1d.at<float>(i, 0) = 0;
+        else window1d.at<float>(i, 0) = 1.0;
+
+    } /**/
+
+    // Populate 1D window, overlap 16
     /**/
+    for (int i = 0; i < N; i++) {
+             if (i == 0) window1d.at<float>(i, 0) = 0;
+        else if (i == 1) window1d.at<float>(i, 0) = 0;
+        else if (i == 2) window1d.at<float>(i, 0) = 0;
+        else if (i == 3) window1d.at<float>(i, 0) = 0;
+        else if (i == 4) window1d.at<float>(i, 0) = 0;
+        else if (i == 5) window1d.at<float>(i, 0) = 0;
+        else if (i == 6) window1d.at<float>(i, 0) = 0;
+        else if (i == 7) window1d.at<float>(i, 0) = 0.2;
+        else if (i == 8) window1d.at<float>(i, 0) = 0.8;
+        else if (i == 9) window1d.at<float>(i, 0) = 1.0;
+        else if (i == (N - 10)) window1d.at<float>(i, 0) = 1.0;
+        else if (i == (N - 9)) window1d.at<float>(i, 0) = 0.8;
+        else if (i == (N - 8)) window1d.at<float>(i, 0) = 0.2;
+        else if (i == (N - 7)) window1d.at<float>(i, 0) = 0;
+        else if (i == (N - 6)) window1d.at<float>(i, 0) = 0;
+        else if (i == (N - 5)) window1d.at<float>(i, 0) = 0;
+        else if (i == (N - 4)) window1d.at<float>(i, 0) = 0;
+        else if (i == (N - 3)) window1d.at<float>(i, 0) = 0;
+        else if (i == (N - 2)) window1d.at<float>(i, 0) = 0;
+        else if (i == (N - 1)) window1d.at<float>(i, 0) = 0;
+        else window1d.at<float>(i, 0) = 1.0;
+
+    } /**/
+
+    //Hanning window
+    /*
+    const float two_pi_over_Nm1 = 2.0f * static_cast<float>(CV_PI) / (N - 1);
+    for (int i = 0; i < N; ++i)
+    {
+        float hann = 0.5f * (1.0f - std::cos(two_pi_over_Nm1 * i));  // Hann
+        window1d.at<float>(i, 0) = hann;
+    }   /**/
+
+    
     // Create a 2D window by taking the outer product of the 1D window with itself
     Mat window2d = window1d * window1d.t();
     /*
@@ -2542,6 +2831,7 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
     cout << window2d.at<float>(1, 2) << endl;
     cout << window2d.at<float>(2, 2) << endl;
     /**/
+    //Mat window2d_gray = window2d;
     cvtColor(window2d, window2d, cv::COLOR_GRAY2BGR);
     /**/
 
@@ -2580,18 +2870,23 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
 
     cout << "used number of threads: " << maxThreads << endl;
 
-    int tileSize = 64;
-    int overlap = 7;
+    //int tileSize = 64;
+    int tileSize = N;  // see window definition
+    //int overlap = 7;
+    int overlap = 16;
+    //int overlap = 32;
     int step = tileSize - overlap;
 
 
     Mat bigImage;
     image.copyTo(bigImage);
-    copyMakeBorder(image, bigImage, 0, tileSize, 0, tileSize, BORDER_CONSTANT, Scalar(0, 0, 0));
+    //copyMakeBorder(image, bigImage, 0, tileSize, 0, tileSize, BORDER_CONSTANT, Scalar(0, 0, 0));
+    copyMakeBorder(image, bigImage, tileSize - overlap, tileSize - overlap, tileSize - overlap, tileSize - overlap, BORDER_REPLICATE, Scalar(0, 0, 0));
 
     //define black image for output
     Mat bigImage_out(bigImage.rows, bigImage.cols, CV_32FC3, Scalar(0, 0, 0));
     //Mat bigImage_out; bigImage.copyTo(bigImage_out);
+    //Mat weight_sum(bigImage.rows, bigImage.cols, CV_32FC3, Scalar::all(0));
 
 
     std::vector<std::future<cv::Mat>> futures;
@@ -2649,17 +2944,24 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
             cv::Rect tileRegion(x, y, width, height);
 
             Mat tile2 = futures[index++].get(); // Get the result from future and place in the corresponding region
-            add(tile2, bigImage_out(tileRegion), tile2);
-            tile2.copyTo(bigImage_out(tileRegion));
+            //add(tile2, bigImage_out(tileRegion), tile2);
+            //tile2.copyTo(bigImage_out(tileRegion));
+
+            add(tile2, bigImage_out(tileRegion), bigImage_out(tileRegion));          // accumulate colour
+            //add(window2d, weight_sum(tileRegion), weight_sum(tileRegion));     // accumulate weights
         }
     }
 
+    //Mat mat8uc3;
+    //weight_sum.convertTo(mat8uc3, CV_8UC3, 250);
+    //imwrite("weights.tiff", mat8uc3);
 
 
 
     int width = image.cols;
     int height = image.rows;
-    Rect cropRegion(0, 0, width, height);
+    //Rect cropRegion(0, 0, width, height);
+    Rect cropRegion(tileSize - overlap, tileSize - overlap, width, height);
     if (mix > 0.99)
         image = bigImage_out(cropRegion);
     else
@@ -2676,7 +2978,7 @@ void NN_noise_reduction(const fdeep::model& model, Mat& image, double mix) {
 
     /**/
 }
-#endif /* AI_NOISEREDUCTION */
+
 
 // Function to apply moving average filter on a one-dimensional array
 void movingAverage(const Mat& input, Mat& output, int windowSize) {
@@ -2964,8 +3266,7 @@ void enhance_stars2(Mat& stack_image, Mat& final_image, float star_blob_radius, 
 
 
 
-//void highlight_protection(Mat& image)
-void highlight_protection(Mat& image, Mat& dark_image)
+void highlight_protection(Mat& image, Mat& dark_image, float factor, float floor)
 {
     //Mat dark_image;
     //image.copyTo(dark_image);
@@ -2973,6 +3274,17 @@ void highlight_protection(Mat& image, Mat& dark_image)
 
     Mat mask_for_dark, mask_for_orig;
     cvtColor(image, mask_for_dark, cv::COLOR_BGR2GRAY);
+
+    if (floor > 0.01) {
+        float scale = 1.0f / (1.0f - floor);
+        mask_for_dark = (mask_for_dark - floor) * scale;   // fast, uses SIMD under the hood
+
+        // Clamp negatives to 0 (anything that was <= floor)
+        max(mask_for_dark, 0.0f, mask_for_dark);
+
+        // (optional) cap tiny round-off to exactly 1
+        min(mask_for_dark, 1.0f, mask_for_dark);
+    }
 
     int blur_size = std::min(image.cols, image.rows);
     blur_size = blur_size / 300;
@@ -2982,7 +3294,7 @@ void highlight_protection(Mat& image, Mat& dark_image)
     medianBlur(mask_for_dark, mask_for_dark, blur_size);
     GaussianBlur(mask_for_dark, mask_for_dark, Size(blur_size, blur_size), 0);
 
-    mask_for_dark = mask_for_dark * 0.4;
+    mask_for_dark = mask_for_dark * factor;
 
     cvtColor(mask_for_dark, mask_for_dark, cv::COLOR_GRAY2BGR);
 
@@ -2993,7 +3305,151 @@ void highlight_protection(Mat& image, Mat& dark_image)
     multiply(image, mask_for_orig, image);
 
     image = image + dark_image;
+}
 
+void highlight_protection2(Mat& image, Mat& dark_image, float factor, float floor, Mat& test_image)
+{
+
+    Mat mask_for_dark, mask_for_orig;
+    cvtColor(dark_image, mask_for_dark, cv::COLOR_BGR2GRAY);
+
+    if (floor > 0.01) {
+        float scale = 1.0f / (1.0f - floor);
+        mask_for_dark = (mask_for_dark - floor) * scale;   // fast, uses SIMD under the hood
+
+        // Clamp negatives to 0 (anything that was <= floor)
+        max(mask_for_dark, 0.0f, mask_for_dark);
+
+        // (optional) cap tiny round-off to exactly 1
+        min(mask_for_dark, 1.0f, mask_for_dark);
+    }
+
+    int blur_size = std::min(image.cols, image.rows);
+    blur_size = blur_size / 300;
+    if (blur_size < 4) blur_size = 4;
+    if ((blur_size % 2) == 0) blur_size -= 1;
+
+    medianBlur(mask_for_dark, mask_for_dark, blur_size);
+    GaussianBlur(mask_for_dark, mask_for_dark, Size(blur_size, blur_size), 0);
+
+    mask_for_dark = mask_for_dark * factor;
+
+    cvtColor(mask_for_dark, mask_for_dark, cv::COLOR_GRAY2BGR);
+
+
+
+    mask_for_dark.copyTo(test_image);
+
+
+
+    mask_for_orig = Scalar(1, 1, 1) - mask_for_dark;
+
+    multiply(dark_image, mask_for_dark, dark_image);
+
+    multiply(image, mask_for_orig, image);
+
+    image = image + dark_image;
+}
+
+
+void draw_clock(Mat& image) {
+
+        const int H = image.rows;
+        const int W = image.cols;
+        const int thickness = 3;
+
+        // Position & size
+        const cv::Point center(W / 2, static_cast<int>(std::lround(0.9 * H)));
+        const int radius = static_cast<int>(std::lround(0.04 * H));          //
+        const int handLen1 = static_cast<int>(std::lround(0.8 * radius));   // slightly shorter than radius
+        const int handLen2 = static_cast<int>(std::lround(0.7 * radius));   // slightly shorter than radius
+
+        // Color: BGR = (0.2, 0.2, 1.0)
+        const cv::Scalar color(0.2, 0.2, 1.0);  // B, G, R
+
+        // Draw circle
+        cv::circle(image, center, radius, color, thickness, cv::LINE_AA);
+
+        // Draw hands pointing to 12 and 3
+        const cv::Point up(center.x, center.y - handLen1); // 12 o'clock
+        const cv::Point right(center.x + handLen2, center.y);         // 3 o'clock
+        cv::line(image, center, up, color, thickness, cv::LINE_AA);
+        cv::line(image, center, right, color, thickness, cv::LINE_AA);
+
+}
+
+
+
+void show_clock() {
+    if (show_clock_flag == 1) {
+
+        if (main_display_flag == 1) {
+            Mat display_image2 = display_image.clone();
+
+            draw_clock(display_image2);
+
+            if (GUI_flag == 1) {
+                setMouseCallback("Display window", onMouse, &buttons);
+                Mat display_image_Buttons = addButtonField(display_image2, buttons);
+                imshow("Display window", display_image_Buttons);
+            }
+            else
+                imshow("Display window", display_image2);
+            key = waitKey(1);
+        }
+
+        else {
+            draw_clock(final_image_eyepiece);
+
+            int interpupillary_distance_pixels = interpupillary_distance_mm * eyepiece_display_X_pixels / eyepiece_display_X_mm;
+            int eyepiece_image_radius_pixels;
+            int eyepiece_image_size_pixels;
+
+            if (eyepiece_display_flag == 1) { //single image
+                eyepiece_image_radius_pixels = min(eyepiece_display_Y_pixels / 2, eyepiece_display_X_pixels / 2);
+                eyepiece_image_size_pixels = eyepiece_image_radius_pixels * 2;
+            }
+            else {  //stereo image
+                int image_radius_pixels_1 = interpupillary_distance_pixels / 2;
+                int image_radius_pixels_2 = eyepiece_display_Y_pixels / 2;
+                int image_radius_pixels_3 = (eyepiece_display_X_pixels - interpupillary_distance_pixels) / 2;
+                eyepiece_image_radius_pixels = min({ image_radius_pixels_1, image_radius_pixels_2, image_radius_pixels_3 });
+                eyepiece_image_size_pixels = eyepiece_image_radius_pixels * 2;
+            }
+
+            //Black base image
+            Mat eyepiece_image(eyepiece_display_Y_pixels, eyepiece_display_X_pixels, CV_32FC3, Scalar(0, 0, 0));
+
+            //Copy small images into large one
+            if (eyepiece_display_flag == 1) {
+                Rect roi1(eyepiece_display_X_pixels / 2 - eyepiece_image_radius_pixels,
+                    eyepiece_display_Y_pixels / 2 - eyepiece_image_radius_pixels,
+                    final_image_eyepiece.cols,
+                    final_image_eyepiece.rows);
+                final_image_eyepiece.copyTo(eyepiece_image(roi1));
+            }
+            else {
+                Rect roi1(eyepiece_display_X_pixels / 2 - interpupillary_distance_pixels / 2 - eyepiece_image_radius_pixels,
+                    eyepiece_display_Y_pixels / 2 - eyepiece_image_radius_pixels,
+                    final_image_eyepiece.cols,
+                    final_image_eyepiece.rows);
+                final_image_eyepiece.copyTo(eyepiece_image(roi1));
+                Rect roi2(eyepiece_display_X_pixels / 2 + interpupillary_distance_pixels / 2 - eyepiece_image_radius_pixels,
+                    eyepiece_display_Y_pixels / 2 - eyepiece_image_radius_pixels,
+                    final_image_eyepiece.cols,
+                    final_image_eyepiece.rows);
+                final_image_eyepiece.copyTo(eyepiece_image(roi2));
+            }
+
+            rotate_image(eyepiece_image, eyepiece_display_rotation, 0);
+
+
+            //Mat img_test = imread("C:/Users/HOME/Desktop/stacks_test/stack_2024-03-08_21-46-02.tiff", IMREAD_UNCHANGED);
+            imshow("Eyepiece", eyepiece_image);
+
+            key = waitKey(1);
+        };
+    }
 
 }
 
@@ -3024,7 +3480,6 @@ void save_sub_image(Mat& image)
 
 
 
-
 // Acquisition thread: captures and pre-processes frames
 void acquisition_thread() {
     
@@ -3034,6 +3489,8 @@ void acquisition_thread() {
     while (capture_running) {
 
         if (mode_change == true) {   // check if mode should be changed
+            prohibit_new_frame = true;
+
             if (state == video_state) state = foto_state;
             else state = video_state;
 
@@ -3042,11 +3499,11 @@ void acquisition_thread() {
 
 
         if ((old_state == foto_state) && (state == video_state)) {  // change to video mode
-            if (exposure_time_v < exposure_threshold) {  //video mode
-                stop_exposure();
+            if (use_video_mode) {  //video mode
+                stop_video();
                 set_camera_controls();
                 start_video();
-                get_video_frame(); // dummy frame
+                //get_video_frame(); // dummy frame
                 frames_stacked = 0;
             }
             else {                            // single exposure mode
@@ -3057,11 +3514,11 @@ void acquisition_thread() {
             }
         }
         else if ((old_state == video_state) && (state == foto_state)) {  // change to foto/stacking exposure mode
-            if (exposure_time_v < exposure_threshold) {  //video mode
+            if (use_video_mode) {  //video mode
                 stop_video();
                 set_camera_controls();
-                start_exposure();
-                get_video_frame(); // dummy frame
+                start_video();
+                //get_video_frame(); // dummy frame
                 frames_stacked = 0;
             }
             else {                             // single exposure mode
@@ -3073,9 +3530,9 @@ void acquisition_thread() {
         }/**/
         else if ((old_state == video_state) && (state == video_state)) {  // video mode, check for new frame
 
-            if ((exposure_time_v < exposure_threshold) || ((exposure_time_v >= exposure_threshold) && (exposure_status() == 1))) {
+            if ( use_video_mode || ((!use_video_mode) && (exposure_status() == 1))) {
 
-                if (exposure_time_v < exposure_threshold) {    //video mode
+                if (use_video_mode) {    //video mode
                     get_video_frame();
                 }
                 else {
@@ -3100,6 +3557,8 @@ void acquisition_thread() {
                     shared_RAW_image = mat16uc1_bayer.clone();
                 }
 
+                // for testing puprose
+                //cout << mat16uc1_bayer.at<uint16_t>(1, 1) << endl;
 
                 // Convert to int32
                 Mat mat32sc1_bayer(camera_image_height, camera_image_width, CV_32SC1);
@@ -3118,8 +3577,18 @@ void acquisition_thread() {
 
                 // Decode Bayer data to RGB or mix monochrome to RGB
                 Mat mat16uc3_rgb(camera_image_height, camera_image_width, CV_16UC3);
-                if (asi_camera_info[cam]->IsColorCam == ASI_TRUE)
-                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
+                if (is_color_cam) {
+                    if (bayer_pattern == 0)
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
+                    else if (bayer_pattern == 1)
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerBGGR2BGR);
+                    else if (bayer_pattern == 2)
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerGRBG2BGR);
+                    else if (bayer_pattern == 3)
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerGBRG2BGR);
+                    else  // not known, default
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
+                }
                 else
                     cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_GRAY2BGR);
 
@@ -3154,6 +3623,7 @@ void acquisition_thread() {
                 }
 
                 frames_stacked = 1;
+                prohibit_new_frame = false;
 
             }
             else
@@ -3162,11 +3632,26 @@ void acquisition_thread() {
         }
         /**/
         else if ((old_state == foto_state) && (state == foto_state)) {  // long exposure mode, check for new frame
-            if (exposure_status() == 1)
-            {
-                get_foto_frame();
 
-                start_exposure();
+            if (  ((use_video_mode) && (get_video_frame() == 1))   ||   ((!use_video_mode) && (exposure_status() == 1))    ) {
+
+                if (use_video_mode) {    //video mode
+                    // already done
+                    //get_video_frame();
+                }
+                else {
+                    get_foto_frame();
+                    start_exposure();
+                }
+
+
+            //if (exposure_status() == 1)
+            //{
+                //get_foto_frame();
+
+                //start_exposure();
+
+
 
                 //frames_stacked++;
 
@@ -3211,8 +3696,18 @@ void acquisition_thread() {
 
                 // Decode Bayer data to RGB or mix monochrome to RGB
                 Mat mat16uc3_rgb(camera_image_height, camera_image_width, CV_16UC3);
-                if (asi_camera_info[cam]->IsColorCam == ASI_TRUE)
-                    cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
+                if (is_color_cam) {
+                    if (bayer_pattern == 0)
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
+                    else if (bayer_pattern == 1)
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerBGGR2BGR);
+                    else if (bayer_pattern == 2)
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerGRBG2BGR);
+                    else if (bayer_pattern == 3)
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerGBRG2BGR);
+                    else  // not known, default
+                        cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_BayerRGGB2BGR);
+                }
                 else
                     cvtColor(mat16uc1_bayer, mat16uc3_rgb, cv::COLOR_GRAY2BGR);
 
@@ -3248,10 +3743,26 @@ void acquisition_thread() {
                     Ptr<Mapper> mapper = makePtr<MapperGradEuclid>();
                     MapperPyramid mappPyr(mapper);
 
+                    // calculation for square registration region inside circular mask
+                    int N = round(0.7 * first_image_acq.rows * circular_mask_background_size);
+                    int x_center = (first_image_acq.cols - N) / 2;
+                    int y_center = (first_image_acq.rows - N) / 2;
+                    Rect roi(x_center, y_center, N, N);
+                    
+
                     if (frames_stacked == 1)
-                        mapPtr = mappPyr.calculate(first_image_acq, mat32fc3_rgb);
+                        if (circular_mask_background_flag == 1)  // registration for square region inside circular mask only
+                            mapPtr = mappPyr.calculate(first_image_acq(roi).clone(), mat32fc3_rgb(roi).clone());
+                        else                                       // registration for full image
+                            mapPtr = mappPyr.calculate(first_image_acq, mat32fc3_rgb);
                     else
-                        mapPtr = mappPyr.calculate(first_image_acq, mat32fc3_rgb, mapPtr_old);
+                        if (circular_mask_background_flag == 1)
+                            mapPtr = mappPyr.calculate(first_image_acq, mat32fc3_rgb, mapPtr_old);
+                        else
+                            mapPtr = mappPyr.calculate(first_image_acq(roi).clone(), mat32fc3_rgb(roi).clone(), mapPtr_old);
+
+                    //imshow("test", first_image_acq(roi).clone());
+                    //waitKey(1);
 
                     mapPtr_old = mapPtr;
 
@@ -3292,11 +3803,16 @@ void acquisition_thread() {
 
                 frames_stacked++;
 
+                prohibit_new_frame = false;
+
                 //wait_idle();
 
             }
             else
-                this_thread::sleep_for(chrono::milliseconds(50));
+                if (NV_mode == 1)
+                    this_thread::sleep_for(chrono::milliseconds(10));
+                else
+                    this_thread::sleep_for(chrono::milliseconds(50));
         } /**/
 
         old_state = state;
@@ -3311,7 +3827,230 @@ void acquisition_thread() {
 
 
 
+// Filtering thread: NN filtering frames
+void filtering_thread() {
 
+    Mat stack_image_filt;
+
+    float gamma_n = 0;
+
+    cout << "filtering_thread started" << endl;
+    logfile << "filtering_thread started" << endl;
+
+
+    // load neural network model
+    cout << "Reading AI model: " << AI_noise_model_filename << endl;
+    logfile << "Reading AI model: " << AI_noise_model_filename << endl;
+    const auto model = fdeep::load_model(AI_noise_model_filename);
+
+
+
+
+    while (capture_running) {
+
+        if ((new_frame_available || palette_change) && (prohibit_new_frame == false) ) {
+            if (palette_change)
+                palette_change = false;
+
+
+            // Copy image from camera thread
+            {
+                lock_guard<mutex> lock(stack_image_mutex);
+                stack_image_filt = shared_stack_image.clone();
+                new_frame_available = false;
+            }
+
+
+
+            if (stack_from_file == 1) { // test mode
+                Mat read_image = imread("saved_pictures/test_image_stack.tiff", IMREAD_UNCHANGED);
+                read_image.convertTo(stack_image_filt, CV_32FC3, 1 / 65535.0);
+            }
+
+
+
+            //Banding filter
+            if (((banding_filter_flag == 1) || (banding_filter_flag == 2)) && (state == video_state)) {
+                banding_filter(stack_image_filt, banding_filter_flag, banding_filter_strength, banding_filter_threshold);
+            }
+
+
+
+            //for bright stars "blobs"
+            if ((enhance_stars_flag == 1) && (focusing_flag == 0))    //
+                enhance_stars(stack_image_filt, stack_image_filt, star_blob_radius, star_blob_strength);
+
+
+            //cout << "before WB" << stack_image_filt.at<Vec3f>(748, 684) << endl;
+            //cout << "before WB" << stack_image_filt.at<Vec3f>(748, 672) << endl;
+            //cout << "before WB" << stack_image_filt.at<Vec3f>(538, 1155) << endl;
+
+            // WB before stretch
+            if ((WBcorr_R < 0.99) || (WBcorr_G < 0.99) || (WBcorr_B < 0.99) || (WBcorr_R > 1.01) || (WBcorr_G > 1.01) || (WBcorr_B > 1.01))
+                if (color_palette == palette_rgb)
+                    if (focusing_flag == 0)
+                        WB_correction(stack_image_filt, WBcorr_R, WBcorr_G, WBcorr_B);
+
+            min(stack_image_filt, 1.0f, stack_image_filt);
+            max(stack_image_filt, 0.0f, stack_image_filt);
+
+            //cout << "before c-matrix" << stack_image_filt.at<Vec3f>(748, 684) << endl;
+            //cout << "before c-matrix" << stack_image_filt.at<Vec3f>(748, 672) << endl;
+            //cout << "before c-matrix" << stack_image_filt.at<Vec3f>(538, 1155) << endl;
+
+            // color correction matrix before stretch
+            if ((color_correction_flag == 1) && (color_palette == palette_rgb) && (focusing_flag == 0))
+                color_correction(stack_image_filt);
+
+
+            // Dualband palette
+            if ((color_palette == palette_duo) && (focusing_flag == 0)) {
+                dualband_colors(stack_image_filt);
+            }
+
+            min(stack_image_filt, 1.0f, stack_image_filt);
+            max(stack_image_filt, 0.0f, stack_image_filt);
+
+            //cout << "before b-level" << stack_image_filt.at<Vec3f>(748, 684) << endl;
+            //cout << "before b-level" << stack_image_filt.at<Vec3f>(748, 672) << endl;
+            //cout << "before b-level" << stack_image_filt.at<Vec3f>(538, 1155) << endl;
+
+            // Black level
+            if (background_comp_flag == 1)
+                if (state == video_state)
+                    black_level(stack_image_filt, black_level_value_v);
+                else
+                    black_level(stack_image_filt, black_level_value_f);
+            else if (background_comp_flag == 2)
+                if (state == video_state)
+                    black_level_gradient(stack_image_filt, black_level_value_v);
+                else
+                    black_level_gradient(stack_image_filt, black_level_value_f);
+
+            //cout << "before noise gamma" << stack_image_filt.at<Vec3f>(748, 684) << endl;
+            //cout << "before noise gamma" << stack_image_filt.at<Vec3f>(748, 672) << endl;
+            //cout << "before noise gamma" << stack_image_filt.at<Vec3f>(538, 1155) << endl;
+
+           
+
+            if (state == foto_state) {
+                bool doNR = (AI_noise_factor > 0.01f) && (frames_stacked > AI_noise_frames);
+                bool doPop = (midtone_strength > 0.01f);
+                bool needsGamma = doNR || doPop;
+
+                Mat before_NN_image;
+
+                if (doNR) {
+                    stack_image_filt.copyTo(before_NN_image);
+                }
+
+                if (needsGamma) {
+                    if (abs(gamma_n - gamma) > 1e-6f) {
+                        gamma_n = gamma;
+                        compute_LUT_noise(gamma_n);
+                    }
+                    //add blackpoint offset, compensated with stretch curve slope
+                    float stretch_slope = (LUT_noise_out[10] - LUT_noise_out[0]) / (LUT_noise_in[10] - LUT_noise_in[0]);
+                    add(stack_image_filt, Scalar(black_point_offset / stretch_slope, black_point_offset / stretch_slope, black_point_offset / stretch_slope), stack_image_filt);
+
+                    gamma_noise_correction(stack_image_filt, gamma_n);
+                }
+
+                if (doNR) {
+                    if ( (AI_noise_factor > 0.99) && (AI_noise_factor < 1.01))
+                        NN_noise_reduction(model, stack_image_filt, 1.0);
+                    else if (AI_noise_factor <= 0.99)
+                        NN_noise_reduction(model, stack_image_filt, AI_noise_factor);
+                    else {
+                        Mat noise_image;
+                           stack_image_filt.copyTo(noise_image);
+
+                        NN_noise_reduction(model, stack_image_filt, 1.0);
+
+                        noise_image = noise_image - stack_image_filt;
+                        //imshow("noise", noise_image); waitKey(1);
+
+                        // square inside circular_mask_background
+                        int N = round(0.7 * noise_image.rows * circular_mask_background_size);
+                        int x_center = (noise_image.cols - N) / 2;
+                        int y_center = (noise_image.rows - N) / 2;
+                        Rect roi(x_center, y_center, N, N);
+                        //Rect roi(noise_image.cols/4, noise_image.rows / 4, noise_image.cols / 2, noise_image.rows / 2);
+
+                        Scalar mean, stddev;
+                        meanStdDev(noise_image(roi).clone(), mean, stddev);
+                        float noise = sqrt((stddev[0] * stddev[0] + stddev[1] * stddev[1] + stddev[2] * stddev[2]) / 3);
+
+                        //float noise_min = 0.01;
+                        //float noise_max = 0.04;
+                        //float factor_min = 0.1;
+                        //float factor_max = 0.95;
+
+                        float factor = (noise - AI_noise_min) * ((AI_noise_factor_max - AI_noise_factor_min) / (AI_noise_max - AI_noise_min)) + AI_noise_factor_min;
+                        if (factor < AI_noise_factor_min) factor = AI_noise_factor_min;
+                        if (factor > AI_noise_factor_max) factor = AI_noise_factor_max;
+                        cout << "Noise amplitude: " << noise << " Filter strength: " << factor << endl;
+
+                        stack_image_filt = stack_image_filt + noise_image * (1 - factor);
+                    }
+                }
+
+                /**/
+                if (doPop) {
+                    // contrast enhancement "Pop"
+
+                    popfx::Params p;
+                    p.strength = midtone_strength;  // main knob
+                    p.radius = midtone_radius;     // 20–40 typical (scale with resolution)
+                    p.eps = 1.5e-4f;// maps to bilateral sigmaColor internally
+                    p.micro = 0.1f;   // fine “crispness”
+                    p.midWidth = midtone_width;  // midtone emphasis
+                    p.base_ds = 0.3f;   // downsample base (speed!)
+                    p.use_opencl = true;   // try OpenCL if available
+
+                    stack_image_filt = popfx::popEffect(stack_image_filt, p);
+                }/**/
+
+
+                //cout << "before inv gamma" << stack_image_filt.at<Vec3f>(748, 684) << endl;
+                //cout << "before inv gamma" << stack_image_filt.at<Vec3f>(748, 672) << endl;
+                //cout << "before inv gamma" << stack_image_filt.at<Vec3f>(538, 1155) << endl;
+
+                if (needsGamma) {
+                    gamma_noise_inv_correction(stack_image_filt, gamma_n);
+
+                    //subtract blackpoint offset, compensated with stretch curve slope
+                    float stretch_slope = (LUT_noise_out[10] - LUT_noise_out[0]) / (LUT_noise_in[10] - LUT_noise_in[0]);
+                    add(stack_image_filt, Scalar(-black_point_offset / stretch_slope, -black_point_offset / stretch_slope, -black_point_offset / stretch_slope), stack_image_filt);
+                }
+
+                if (doNR)
+                    highlight_protection2(stack_image_filt, before_NN_image, 1.0, 0.2, mask);
+
+            }
+
+
+
+            {
+                lock_guard<mutex> lock(filt_image_mutex);
+                shared_filtered_image = stack_image_filt.clone();
+                if ( (palette_change == false) && (mode_change == false) )
+                    new_filt_frame_available = true;
+            }
+
+        }
+        else
+            if (NV_mode == 1)
+                this_thread::sleep_for(chrono::milliseconds(10));
+            else
+                this_thread::sleep_for(chrono::milliseconds(50));
+        
+    }
+
+
+    cout << "filtering_thread stopping..." << endl;
+    logfile << "filtering_thread stopping..." << endl;
+}
 
 
 
@@ -3320,15 +4059,16 @@ int main(int argc, char* argv[])
 {
 
 #define sw_name      "Digital Astronomy Eyepiece App"
-#define version      "Version 0.400, 01.05.2025"
+#define version      "Version 0.500, 01.09.2025"
 #define copyright    "Copyright Andriy Melnykov 2025"
-#define supp_cameras "This version supports only ZWO ASI cameras"
+#define supp_cameras "This version supports ZWO ASI cameras, SVBony as beta"
 #define libraries    "Libraries used (see also licenses folder):"
 #define license_1    "ASICamera2 SDK, copyright ZWO company"
-#define license_2    "OpenCV, Apache License 2.0"
-#define license_3    "CFITSIO, copyright National Aeronautics and Space Administration"
-#define license_4    "frugally-deep, copyright (c) 2016 Tobias Hermann"
-#define license_5    "OpenCV reg module, copyright (C) 2013, Alfonso Sanchez-Beato"
+#define license_2    "SVBCamera SDK, copyright SVBony company"
+#define license_3    "OpenCV, Apache License 2.0"
+#define license_4    "CFITSIO, copyright National Aeronautics and Space Administration"
+#define license_5    "frugally-deep, copyright (c) 2016 Tobias Hermann"
+#define license_6    "OpenCV reg module, copyright (C) 2013, Alfonso Sanchez-Beato"
 
     cout << sw_name << endl;
     cout << version << endl;
@@ -3339,7 +4079,8 @@ int main(int argc, char* argv[])
     cout << license_2 << endl;
     cout << license_3 << endl;
     cout << license_4 << endl;
-    cout << license_5 << endl << endl;
+    cout << license_5 << endl;
+    cout << license_6 << endl << endl;
 
 
 
@@ -3373,7 +4114,8 @@ int main(int argc, char* argv[])
             logfile << license_2 << endl;
             logfile << license_3 << endl;
             logfile << license_4 << endl;
-            logfile << license_5 << endl << endl;
+            logfile << license_5 << endl;
+            logfile << license_6 << endl << endl;
 
             cout << "File log.txt opened" << endl;
         }
@@ -3400,12 +4142,14 @@ int main(int argc, char* argv[])
     }
     /**/
 
-#if AI_NOISEREDUCTION
+    /*
+
     // load neural network model
     cout << "Reading AI model: " << AI_noise_model_filename << endl;
     logfile << "Reading AI model: " << AI_noise_model_filename << endl;
     const auto model = fdeep::load_model(AI_noise_model_filename);
-#endif /* AI_NOISEREDUCTION */
+    /**/
+
 
     // check for "saved_pictures" folder
     fs::path dir = "saved_pictures";
@@ -3437,17 +4181,67 @@ int main(int argc, char* argv[])
     
 
     check_cameras();
+
+
+    if (asi_connected_cameras > 0)
+        use_video_mode = true;
+    else if (svb_connected_cameras > 0)
+        use_video_mode = true;
     
+    if ( (camera_from_file == 1) || (stack_from_file == 1) )
+        use_video_mode = false;
+
+
     cam = 0; // Camera index, always first camera
     cout << "Set camera index: " << cam << endl;
     logfile << "Set camera index: " << cam << endl;
 
     get_camera_properties();
     
+
+    
+
+
     if (camera_from_file == 1)
-        asi_camera_info[cam]->IsColorCam = ASI_TRUE;//ASI_FALSE; //ASI_TRUE;
+        is_color_cam = true;
 
     open_init_camera();
+
+    
+    //is_color_cam = false; // for test, force mono
+    
+
+    //for test
+    /*
+    state = foto_state;
+    old_state = foto_state;
+    set_camera_controls();
+    close_camera();
+
+    cout << "Test ended. Press Enter to close...";
+    cin.get();
+    exit(1);  // return 1;
+    /**/
+    //for test
+
+    if (main_display_flag == 0) {
+        special_setup_01 = 1;
+        if (eyepiece_display_flag == 0)
+            eyepiece_display_flag = 2;
+    }
+    else {
+        special_setup_01 = 0;
+    }
+
+    //main_display_flag = 1;
+
+    //if (special_setup_01 == 1) {
+    //    main_display_flag = 0;
+    //    eyepiece_display_flag = 2;
+    //}
+
+
+
 
     
     //Read darks and flats
@@ -3475,15 +4269,17 @@ int main(int argc, char* argv[])
 
 
     //Start main window
-    Mat black_image(display_height, display_height, CV_32FC3, Scalar(0, 0, 0));
-    namedWindow("Display window");
-    setMouseCallback("Display window", onMouse, &buttons);
-    if (GUI_flag == 1) {
-        Mat display_image_Buttons = addButtonField(black_image, buttons);
-        imshow("Display window", display_image_Buttons);
+    if (main_display_flag == 1) {
+        Mat black_image(display_height, display_height, CV_32FC3, Scalar(0, 0, 0));
+        namedWindow("Display window");
+        setMouseCallback("Display window", onMouse, &buttons);
+        if (GUI_flag == 1) {
+            Mat display_image_Buttons = addButtonField(black_image, buttons);
+            imshow("Display window", display_image_Buttons);
+        }
+        else
+            imshow("Display window", black_image);
     }
-    else
-        imshow("Display window", black_image);
 
 
 
@@ -3503,7 +4299,11 @@ int main(int argc, char* argv[])
 
     // starting separate thread for camera frame acquisition and pre-processing
     thread acqThread(acquisition_thread);
+    this_thread::sleep_for(chrono::milliseconds(1));
 
+    // starting separate thread for camera frame filtering
+    thread filtThread(filtering_thread);
+    this_thread::sleep_for(chrono::milliseconds(1));
  
 
     new_picture = 0;
@@ -3518,23 +4318,42 @@ int main(int argc, char* argv[])
             }
         }
 
+
+
         // check color palette changes
         if ((key == key_palette) || (buttons[2].pressed == true)) {
+
+            show_clock();
+
             if (color_palette == palette_rgb) color_palette = palette_duo;
             else if (color_palette == palette_duo) color_palette = palette_rgb;
             
-            new_picture = 1;
+            //new_picture = 1;
+            palette_change = true;
+            new_filt_frame_available = false;
+
             buttons[2].pressed = false;
 
             logfile << "Key/button pressed: palette" << endl;
         }
 
+
+
         // state machine change state
         if ((key == key_mode) || (buttons[3].pressed == true)) {
+
+            show_clock();
+
             //if (state == video_state) state = foto_state;
             //else state = video_state;
 
+            prohibit_new_frame = true;
+
             mode_change = true;
+
+            //discard any pending “old - mode” frames so GUI won’t show them
+            new_frame_available = false;
+            new_filt_frame_available = false;
 
             // reset all zooms
             focusing_flag = 0;
@@ -3546,29 +4365,50 @@ int main(int argc, char* argv[])
             logfile << "Key/button pressed: mode" << endl;
         }
 
+
+
         // focusing zoom / zoom
         if ((key == key_focusing) || (buttons[4].pressed == true)) {
+
+            show_clock();
+
             if (state == video_state) {
-                if (focusing_flag == 1) focusing_flag = 0;
-                else focusing_flag = 1;
+                if (is_color_cam == false) { // mono camera
+                    if (display_zoom_value > (display_zoom_value_stored * 1.1))
+                        display_zoom_value = display_zoom_value_stored;
+                    else
+                        display_zoom_value = display_zoom_value_stored * focusing_zoom_value;
+                    new_picture = 1;
+                }
+                else {
+                    if (focusing_flag == 1) focusing_flag = 0;
+                    else focusing_flag = 1;
+                    palette_change = true;
+                    new_filt_frame_available = false;
+                }
             }
             else {
-                if (display_zoom_value > (display_zoom_value_stored * 1.9))
+                if (display_zoom_value > (display_zoom_value_stored * 1.1))
                     display_zoom_value = display_zoom_value_stored;
-                else if (display_zoom_value > (display_zoom_value_stored * 1.1))
-                    display_zoom_value = display_zoom_value_stored * 2;
                 else
-                    display_zoom_value = display_zoom_value_stored * 1.5;
+                    display_zoom_value = display_zoom_value_stored * zoom_value;
+                new_picture = 1;
             }
 
-            new_picture = 1;
+            //new_picture = 1;
+            //palette_change = true;
             buttons[4].pressed = false;
 
             logfile << "Key/button pressed: zoom" << endl;
         }
 
+
+
         // gain change
         if ((key == key_plus) || (buttons[1].pressed == true)) {
+
+            show_clock();
+
             gamma *= 1.5;
             //gamma /= 1.1;
             compute_LUT(gamma);
@@ -3576,8 +4416,14 @@ int main(int argc, char* argv[])
             buttons[1].pressed = false;
 
             logfile << "Key/button pressed: +" << endl;
+
+            
+
         }
         if ((key == key_minus) || (buttons[0].pressed == true)) {
+
+            show_clock();
+
             if (gamma > 0.5) gamma /= 1.5;
             //gamma *= 1.1;
             compute_LUT(gamma);
@@ -3586,10 +4432,14 @@ int main(int argc, char* argv[])
 
             logfile << "Key/button pressed: -" << endl;
         }
+
+
         // save image
         if ( (key == key_save_image) || 
              (buttons[6].pressed == true) ||
              ( (auto_save_pictures == 1) && (frames_stacked > 1) && ((frames_stacked % auto_save_pictures_n) == 0) && (saved_at_frames_stacked != frames_stacked) )  ) {
+
+            show_clock();
 
             if ((key != key_save_image) && (buttons[6].pressed != true))
                 saved_at_frames_stacked = frames_stacked;
@@ -3612,12 +4462,39 @@ int main(int argc, char* argv[])
             //display_image.convertTo(mat16uc3, CV_16UC3, 65535);
             //imwrite(filename, mat16uc3);
 
-            strftime(filename, 80, "saved_pictures/display_%Y-%m-%d_%H-%M-%S.jpg", now);
-            display_image.convertTo(mat8uc3, CV_8UC3, 256);
-            imwrite(filename, mat8uc3);
+                       
+            if (special_setup_01 == 1) { // no main window
+
+                Mat temp_image;
+                final_image.copyTo(temp_image);
+
+                square_image(temp_image); //crop to square
+
+                // Circluar mask
+                Mat circular_mask = Mat::zeros(temp_image.rows, temp_image.cols, CV_32FC3);
+                circle(circular_mask, Point(circular_mask.cols / 2, circular_mask.rows / 2), round(circular_mask.rows * 0.49), Scalar(1, 1, 1), FILLED, LINE_AA);
+                blur(circular_mask, circular_mask, Size(round(circular_mask.rows * 0.02), round(circular_mask.rows * 0.02)));
+                multiply(temp_image, circular_mask, temp_image);
+                
+                strftime(filename, 80, "saved_pictures/display_%Y-%m-%d_%H-%M-%S.jpg", now);
+                temp_image.convertTo(mat8uc3, CV_8UC3, 256);
+                imwrite(filename, mat8uc3);
+            }
+            else {
+                strftime(filename, 80, "saved_pictures/display_%Y-%m-%d_%H-%M-%S.jpg", now);
+                display_image.convertTo(mat8uc3, CV_8UC3, 256);
+                imwrite(filename, mat8uc3);
+            }
+
+            Mat stack_for_save;
+            // Copy image from camera thread
+            {
+                lock_guard<mutex> lock(stack_image_mutex);
+                stack_for_save = shared_stack_image.clone();
+            }
 
             strftime(filename, 80, "saved_pictures/stack_%Y-%m-%d_%H-%M-%S.tiff", now);
-            stack_image_gui.convertTo(mat16uc3, CV_16UC3, 65535);
+            stack_for_save.convertTo(mat16uc3, CV_16UC3, 65535);
             imwrite(filename, mat16uc3);
 
             // saving info to text file
@@ -3647,6 +4524,9 @@ int main(int argc, char* argv[])
 
         // check histogram show key
         if ((key == key_histogram) || (buttons[5].pressed == true)) {
+
+            show_clock();
+
             if (hist_show_state == 1) hist_show_state = 0;
             else hist_show_state = 1;
 
@@ -3658,94 +4538,73 @@ int main(int argc, char* argv[])
 
 
 
+        //cout << new_picture << "," << new_filt_frame_available << endl;
 
-
-
-
-
-
-
-
-
-
-        if ( new_frame_available && (mode_change == false) )
+        // Show picture, if new frame available
+        //if ( (new_filt_frame_available) && (palette_change == false) )
+        if (new_filt_frame_available && (prohibit_new_frame == false))
             new_picture = 1;
-
-
 
 
         // Show picture, if needed
         if (new_picture == 1) {
             new_picture = 0;
         
-                
+            //cout << "showing picture" << endl;
+
+
+
+
+            //Show noise_filt LUT
+            /*
+            if (state == foto_state) {
+                Mat LUTImage(500, 500, CV_8UC1, Scalar(0));
+
+                for (int i = 1; i < LUT_size_noise; i++)
+                {
+                    line(LUTImage, Point(cvRound(500 * LUT_noise_in[i - 1]), cvRound(500 - 500 * LUT_noise_out[i - 1])),
+                        Point(cvRound(500 * LUT_noise_in[i]), cvRound(500 - 500 * LUT_noise_out[i])),
+                        Scalar(255), 1, 8, 0);
+                    line(LUTImage, Point(cvRound(500 * LUT_noise_in[i - 1]), cvRound(500 - 500 * LUT_noise_inv[i - 1])),
+                        Point(cvRound(500 * LUT_noise_in[i]), cvRound(500 - 500 * LUT_noise_inv[i])),
+                        Scalar(128), 1, 8, 0);
+
+                }
+                imshow("LUT", LUTImage);
+            }/**/
+
+
+
+
 
             
-            
-            if (stack_from_file != 1) {
-                {
-                    lock_guard<mutex> lock(stack_image_mutex);
-                    if (new_frame_available) {
-                        stack_image_gui = shared_stack_image.clone();
-                        new_frame_available = false;
-                    }
+            // Copy image from filtering thread
+            {
+                lock_guard<mutex> lock(filt_image_mutex);
+                if (new_filt_frame_available && (prohibit_new_frame == false)) {
+                    stack_image_gui = shared_filtered_image.clone();
+                    new_filt_frame_available = false;
                 }
             }
 
+            
+            //imshow("stack_image_gui", stack_image_gui);
             stack_image_gui.copyTo(final_image);
 
 
 
-            if (stack_from_file == 1) {
-                Mat read_image = imread("saved_pictures/test_image_stack.tiff", IMREAD_UNCHANGED);
-                read_image.convertTo(final_image, CV_32FC3, 1 / 65535.0);
-            }
+            //cout << "before gamma" << final_image.at<Vec3f>(748, 684) << endl;
+            //cout << "before gamma" << final_image.at<Vec3f>(748, 672) << endl;
+            //cout << "before gamma" << final_image.at<Vec3f>(538, 1155) << endl;
 
 
-            //Banding filter
-            if (((banding_filter_flag == 1) || (banding_filter_flag == 2)) && (state == video_state)) {
-                banding_filter(final_image, banding_filter_flag, banding_filter_strength, banding_filter_threshold);
-            }
-                  
-
-
-            //for bright stars "blobs"
-            if ((enhance_stars_flag == 1) && (focusing_flag == 0))    //
-                enhance_stars(final_image, final_image, star_blob_radius, star_blob_strength);
-
-
-            // WB before stretch
-            if ((WBcorr_R < 0.99) || (WBcorr_G < 0.99) || (WBcorr_B < 0.99) || (WBcorr_R > 1.01) || (WBcorr_G > 1.01) || (WBcorr_B > 1.01))
-                if (color_palette == palette_rgb)
-                    if (focusing_flag == 0)
-                        WB_correction(final_image, WBcorr_R, WBcorr_G, WBcorr_B);
-
-            // color correction matrix before stretch
-            if ((color_correction_flag == 1) && (color_palette == palette_rgb))
-                color_correction(final_image);
-
-            // Dualband palette
-            if ((color_palette == palette_duo) && (focusing_flag == 0))
-                dualband_colors(final_image);
+            //add blackpoint offset, compensated with stretch curve slope
+            float stretch_slope = (LUT_out[10] - LUT_out[0]) / (LUT_in[10] - LUT_in[0]);
+            //cout << stretch_slope << endl;
+            add(final_image, Scalar(black_point_offset/ stretch_slope, black_point_offset/ stretch_slope, black_point_offset/ stretch_slope), final_image);
 
 
 
-
-
-
-
-            // Black level, WB, Stretch, Black level-------------
-            // Black level
-            if (background_comp_flag == 1)
-                if (state == video_state)
-                    black_level(final_image, black_level_value_v);
-                else
-                    black_level(final_image, black_level_value_f);
-            else if (background_comp_flag == 2)
-                if (state == video_state)
-                    black_level_gradient(final_image, black_level_value_v);
-                else
-                    black_level_gradient(final_image, black_level_value_f);
 
             final_image.copyTo(dark_image);  // for using as darker image for highlight protection
 
@@ -3754,46 +4613,32 @@ int main(int argc, char* argv[])
             // Stretch
             gamma_correction(final_image, gamma);
             
-            if ((state == foto_state) && (highlight_protection_flag == 1))
+            if ((state == foto_state) && (highlight_protection_par > 0.01))
                 gamma_dark_correction(dark_image, 1.0);   // for using as darker image for highlight protection
 
+
             // Black level
-            /*
-            if (background_comp_flag == 1)
-                black_level(final_image, black_level_value);
-            else if (background_comp_flag == 2)
-                black_level_gradient(final_image, black_level_value);
             /**/
+            if (stack_from_file != 2) { // not for dataset generation mode
+                if (state == video_state)
+                    black_level(final_image, black_level_value_v);
+                else
+                    black_level(final_image, black_level_value_f);
 
-            if (state == video_state)
-                black_level(final_image, black_level_value_v);
-            else
-                black_level(final_image, black_level_value_f);
-
-            if ((state == foto_state) && (highlight_protection_flag == 1))
-                black_level(dark_image, black_level_value_f);   // for using as darker image for highlight protection
+                if ((state == foto_state) && (highlight_protection_par > 0.01))
+                    black_level(dark_image, black_level_value_f);   // for using as darker image for highlight protection
+            }
+            /**/
  
+
+            //add blackpoint offset, after second black level
+            add(final_image, Scalar(black_point_offset, black_point_offset, black_point_offset), final_image);
 
 
             // highlight protection
-            if ((state == foto_state) && (highlight_protection_flag == 1))
-                highlight_protection(final_image, dark_image);
+            if ((state == foto_state) && (highlight_protection_par > 0.01))
+                highlight_protection(final_image, dark_image, highlight_protection_par, 0.0);
 
-
-
-
-
-#if AI_NOISEREDUCTION
-            // here place for NN noise reduction ??
-            
-            if ((state == foto_state) && (AI_noise_factor > 0.01) && (frames_stacked > AI_noise_frames)) {
-                if (AI_noise_factor > 0.99)
-                    NN_noise_reduction(model, final_image, 1.0);
-                else
-                    NN_noise_reduction(model, final_image, AI_noise_factor);
-            }
-            //}
-#endif /* AI_NOISEREDUCTION */
 
 
 
@@ -3807,9 +4652,28 @@ int main(int argc, char* argv[])
             }
 
 
+            /*
+            if ((state == foto_state) && (midtone_strength > 0.01)) {
+                // contrast enhancement "Pop"
+
+                popfx::Params p;
+                p.strength = midtone_strength;  // main knob
+                p.radius = midtone_radius;     // 20–40 typical (scale with resolution)
+                p.eps = 1.5e-4f;// maps to bilateral sigmaColor internally
+                p.micro = 0.1f;   // fine “crispness”
+                p.midWidth = midtone_width;  // midtone emphasis
+                p.base_ds = 0.3f;   // downsample base (speed!)
+                p.use_opencl = true;   // try OpenCL if available
+
+                final_image = popfx::popEffect(final_image, p);
+            }/**/
+
+
+
+
             // contrast enhancement
             // TilesSize, ClipLimit, Amount
-            /**/
+            /*
             if ((state == foto_state) && ( (CLAHE_amount > 0.01) || (sharpen_amount > 0.01) )) {
                 cvtColor(final_image, final_image, COLOR_BGR2Lab);
 
@@ -3875,11 +4739,13 @@ int main(int argc, char* argv[])
             /**/
 
 
-            /*
+            /**/
             // sharpen
             // sharpen image using "unsharp mask" algorithm
             // without is mostly better
             if ((state == foto_state) && (sharpen_amount > 0.01)) {
+                logfile << "sharpen" << endl;
+
                 Mat blurred; 
                 //double sharpen_sigma = 2, sharpen_amount = 0.5; // , threshold = 0.02;
                 GaussianBlur(final_image, blurred, Size(), sharpen_sigma, sharpen_sigma);
@@ -3904,106 +4770,117 @@ int main(int argc, char* argv[])
             rotate_image(final_image, image_rotation, image_flip);
 
 
+            Mat final_image2;
+            final_image.copyTo(final_image2);
 
+            final_image.copyTo(final_image_eyepiece);
 
 
             //Zoom in
             if (display_zoom_value > 1.01) {
-                zoom_in(final_image, display_zoom_value);
+                zoom_in(final_image2, display_zoom_value);
+                zoom_in(final_image_eyepiece, display_zoom_value);
             }
            
 
 
-            Mat final_image2;
-            final_image.copyTo(final_image2);
 
-            //Crop to square, if needed
-            if (circular_mask_flag == 1) {
-                square_image(final_image2); //crop to square
-            }
+            //show main window
 
-            //Focusing zoom
-            if (focusing_flag == 1)
-                focusing_zoom(final_image2, focusing_zoom_value);
+            if (main_display_flag == 1) {
 
+                //Mat final_image2;
+                //final_image.copyTo(final_image2);
 
-            // Resize image for display
-            double display_scale = (float)display_height / final_image2.rows;
-
-            if (display_scale < 0.99)
-                resize(final_image2, display_image, Size(0, 0), display_scale, display_scale, INTER_AREA);
-            else if (display_scale > 1.01)
-                resize(final_image2, display_image, Size(0, 0), display_scale, display_scale, INTER_CUBIC);
-            else final_image2.copyTo(display_image);
-
-            
-
-
-            
-            // Noise reduction
-            if (noise_reduction_flag == 1) {
-
-                if (debug_flag == 1) {
-                    cout << "Apply noise reduction" << endl;
-                    logfile << "Apply noise reduction" << endl;
+                //Crop to square, if needed
+                if (circular_mask_flag == 1) {
+                    square_image(final_image2); //crop to square
                 }
 
-                Mat display_image2;
-                display_image.copyTo(display_image2);
-                int d = 10;
-                int s_v = (int)round(d * filter_strength_1);
-                int s_f = (int)round(d * filter_strength_2);
-                //int max_frames = 5;
-                if ((state == video_state) && (s_v > 0)) {
-                    bilateralFilter(display_image2, display_image, s_v, 200.0, 200.0);
+                //Focusing zoom
+                if (focusing_flag == 1)
+                    focusing_zoom(final_image2, focusing_zoom_value);
+
+
+                // Resize image for display
+                double display_scale = (float)display_height / final_image2.rows;
+
+                if (display_scale < 0.99)
+                    resize(final_image2, display_image, Size(0, 0), display_scale, display_scale, INTER_AREA);
+                else if (display_scale > 1.01)
+                    resize(final_image2, display_image, Size(0, 0), display_scale, display_scale, INTER_CUBIC);
+                else final_image2.copyTo(display_image);
+
+
+
+
+
+                // Noise reduction
+                if (noise_reduction_flag == 1) {
+
+                    if (debug_flag == 1) {
+                        cout << "Apply noise reduction" << endl;
+                        logfile << "Apply noise reduction" << endl;
+                    }
+
+                    Mat display_image2;
+                    display_image.copyTo(display_image2);
+                    int d = 10;
+                    int s_v = (int)round(d * filter_strength_1);
+                    int s_f = (int)round(d * filter_strength_2);
+                    //int max_frames = 5;
+                    if ((state == video_state) && (s_v > 0)) {
+                        bilateralFilter(display_image2, display_image, s_v, 200.0, 200.0);
+                    }
+                    if ((state == foto_state) && (s_f > 0)) {
+                        bilateralFilter(display_image2, display_image, s_f, 200.0, 200.0);;
+                    }
+
                 }
-                if ((state == foto_state) && (s_f > 0)) {
-                    bilateralFilter(display_image2, display_image, s_f, 200.0, 200.0);;
+
+
+
+
+
+                //Apply circular mask
+                if (circular_mask_flag == 1) {
+
+                    //square_image(display_image); //crop to square
+                    //Prepare circular mask for display
+                    Mat circular_mask = Mat::zeros(display_image.rows, display_image.cols, CV_32FC3);
+                    circle(circular_mask, Point(circular_mask.cols / 2, circular_mask.rows / 2), round(circular_mask.rows * 0.49), Scalar(1, 1, 1), FILLED, LINE_AA);
+                    blur(circular_mask, circular_mask, Size(round(circular_mask.rows * 0.02), round(circular_mask.rows * 0.02)));
+
+                    multiply(display_image, circular_mask, display_image);
                 }
 
-            }
 
 
 
 
-            
-            //Apply circular mask
-            if (circular_mask_flag == 1) {
-                
-                //square_image(display_image); //crop to square
-                //Prepare circular mask for display
-                Mat circular_mask = Mat::zeros(display_image.rows, display_image.cols, CV_32FC3);
-                circle(circular_mask, Point(circular_mask.cols / 2, circular_mask.rows / 2), round(circular_mask.rows * 0.49), Scalar(1, 1, 1), FILLED, LINE_AA);
-                blur(circular_mask, circular_mask, Size(round(circular_mask.rows * 0.02), round(circular_mask.rows * 0.02)));
-                
-                multiply(display_image, circular_mask, display_image);
-            }
-            
-           
 
-
-
-            
-            // check if RAW histogram should be shown
-            if (hist_show_state == 1) {
-                {
-                    lock_guard<mutex> lock(RAW_image_mutex);
-                    RAW_image = shared_RAW_image.clone();
+                // check if RAW histogram should be shown
+                if (hist_show_state == 1) {
+                    {
+                        lock_guard<mutex> lock(RAW_image_mutex);
+                        RAW_image = shared_RAW_image.clone();
+                    }
+                    plot_RAW_histogram(display_image, RAW_image);
                 }
-                plot_RAW_histogram(display_image, RAW_image);
+
+                //namedWindow("Display window");
+
+                //draw_clock(display_image);
+
+                if (GUI_flag == 1) {
+                    setMouseCallback("Display window", onMouse, &buttons);
+                    Mat display_image_Buttons = addButtonField(display_image, buttons);
+                    imshow("Display window", display_image_Buttons);
+                }
+                else
+                    imshow("Display window", display_image);
+
             }
-            
-            //namedWindow("Display window");
-
-            if (GUI_flag == 1) {
-                setMouseCallback("Display window", onMouse, &buttons);
-                Mat display_image_Buttons = addButtonField(display_image, buttons);
-                imshow("Display window", display_image_Buttons);
-            }
-            else
-                imshow("Display window", display_image);
-
-
 
 
 
@@ -4029,11 +4906,15 @@ int main(int argc, char* argv[])
                 }
 
 
-                Mat final_image_eyepiece;
-                final_image.copyTo(final_image_eyepiece);
+                //Mat final_image_eyepiece;
+                //final_image.copyTo(final_image_eyepiece);
 
                 //crop to square
                 square_image(final_image_eyepiece); 
+
+                //Focusing zoom
+                if (focusing_flag == 1)
+                    focusing_zoom(final_image_eyepiece, focusing_zoom_value);
 
                 // Resize image for display
                 resize(final_image_eyepiece, final_image_eyepiece, Size(eyepiece_image_size_pixels, eyepiece_image_size_pixels), INTER_AREA);
@@ -4071,6 +4952,18 @@ int main(int argc, char* argv[])
 
                     multiply(final_image_eyepiece, circular_mask, final_image_eyepiece);
                 }
+
+
+                // check if RAW histogram should be shown
+                if ( (hist_show_state == 1) && (special_setup_01 == 1)) {
+                    {
+                        lock_guard<mutex> lock(RAW_image_mutex);
+                        RAW_image = shared_RAW_image.clone();
+                    }
+                    plot_RAW_histogram(final_image_eyepiece, RAW_image);     
+                }
+
+
 
                 //Black base image
                 Mat eyepiece_image(eyepiece_display_Y_pixels, eyepiece_display_X_pixels, CV_32FC3, Scalar(0, 0, 0));
@@ -4119,8 +5012,10 @@ int main(int argc, char* argv[])
        
         }
         else
-            this_thread::sleep_for(chrono::milliseconds(50));
-
+            if (NV_mode == 1)
+                this_thread::sleep_for(chrono::milliseconds(10));
+            else
+                this_thread::sleep_for(chrono::milliseconds(50));
 
 
         key = waitKey(1); // Wait for a keystroke in the window
@@ -4132,18 +5027,17 @@ int main(int argc, char* argv[])
 
     // Stopping programm
 
-    // stopping acquisition and pre-processing thread
+    show_clock();
+
+    // stopping acquisition and pre-processing threads
     capture_running = false;
     acqThread.join();
+    filtThread.join();
 
-    if (state == foto_state)
+    if (use_video_mode)
+        stop_video();
+    else
         stop_exposure();
-
-    if (state == video_state)
-        if (exposure_time_v < exposure_threshold)
-            stop_video();
-        else
-            stop_exposure();
 
 
     close_camera();
@@ -4159,25 +5053,22 @@ int main(int argc, char* argv[])
 
 //TODO
 
-    
-            // switch config on-the-fly per key
-            // registration for stacking only in defined area            
+            // add 4 limit parameters to automatic noise alg
+            // yaml format for config + parameter names check
+            // QHY cameras?
+            // switch config on-the-fly per key         
             // check all camera numbers, cam or 0?        
             // plate solve button
-            // NN filter for linear image?
             // black border, why colors there?
             // delete sattelite trails
-            // Fourier after NN filter
-            // Check borders of NN filter
             // dark mean level as parameter
             // color noise reduction (gaus r=2-3 on color)
             // thread priority?
 
             // different gains for modes?
-            // changing gain / noise filtering during stacking?
+            // changing gamma dark->bright during stacking?
             // correct black level search areas
             // change black level from histogram to blur+min? only for video? only for plane? (+ mask center)
-            // WB tolerant for star colors?
             // show temperature
             // cooler depending on properties?
             // WB_R/B depending on mono parameter?
@@ -4191,7 +5082,6 @@ int main(int argc, char* argv[])
             // limit number of stacked pictures?
             // camera reset, if something wrong?
             // banding filter median filter?
-            // faster video? - how?
 
 // V0.100 beta
 // initial
@@ -4219,3 +5109,21 @@ int main(int argc, char* argv[])
 // - added hot pixel detection without dark frame
 // - corrected bug, working with some image sizes
 // - updated ASI SDK
+
+// V0.5
+// - added support of SVBony cameras
+// - added support of different bayer patterns
+// - changed NN filter algorithm to prevent grid artefacts
+// - changed interaction of NN filter and GUI - more responsive
+// - trained new NN filtes
+// - added automatic mode for NN filter strength
+// - updated frugally deep library
+// - updated white balance and color correction
+// - updated stretch tone curve
+// - added parameter to highlight protection
+// - released eyepiece-only mode
+// - added optional clock waiting symbol
+// - updated registration/alignment area for special cases
+// - added midtone contrast enhancement algorithm
+// - added sigma parameter for hotpixel correction
+// - added black point offset parameter

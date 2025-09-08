@@ -1,0 +1,87 @@
+0 // debug output, screen and log file: 0 - none, 1 – active
+0 15 // save pictures automatically yes/no: 1/0, after n-th frame
+//--------------- Camera and preprocessing Parameters for video mode
+400 //exposure time for video mode, ms
+500 //gain for video mode
+50 //White balance Red for video mode
+50 //White balance Green for video mode //not all cameras use it
+50 //White balance Blue for video mode
+100 //offset for video mode
+0 //high speed mode for video mode, 0 - not active, 1 – active
+1 //use dark frame for hot pixel correction, for video mode, 0 - don't use, 1 - use
+0 //subtract dark frame from light frame, for video mode, 0 - don't use, 1 – use
+0 //use flat frame for video mode, 0 - don't use, 1 – use
+1  //banding filter, 0 - disabled, 1 - rows, 2 - columns
+100  // banding filter window size, 3..200
+1.2  // banding filter threshold, 1.0 .. 2.0
+//--------------- Camera and preprocessing Parameters for foto mode
+4000 //exposure time for foto mode, ms
+300 //gain for foto mode
+50 //White balance Red for foto mode
+50 //White balance Green for foto mode //not all cameras use it
+50 //White balance Blue for foto mode
+100 //offset for foto mode
+1 //use dark frame for hot pixel correction, for foto mode, 0 - don't use, 1 – use
+0 //find hot pixels without/additional to dark frame
+0 //subtract dark frame from light frame, for foto mode, 0 - don't use, 1 – use
+1 //use flat frame for foto mode, 0 - don't use, 1 – use
+//--------------- Calibration files
+533_dark_400ms_g500_off100_25C.fits //dark for video mode
+533_dark_4s_g300_off100_25C.fits //dark for foto mode
+MasterFlat_hyperstar_bin2.fits   //flat for both video and foto mode
+//--------------- Parameters for both video and foto mode
+0 //monobin for both video and foto mode - only 0 supported for now!
+2 //bin for both video and foto mode, 1, 2, ..
+2 //bytes per pixel, 1 for RAW8, 2 for RAW16 - only RAW16 supported for now!
+90 //bandwidth
+3.0  // sigma for dark frame hot pixel correction, 3.0 .. 7.0
+//--------------- Other parameters
+10 //cooler target temperature, °C
+0 //cooler activation, 0 for cooler off, 1 for cooler on
+800  //display size, display window height in pixels
+0  //image flip horizontally: 0 - none, 1 - flip
+2 //image rotation for display: 0, 1, 2, 3 (0, 90°, 180°, 270° clockwise)
+2 //background subtraction: 0 - none, 1 - constant level, 2 - gradient
+0.05 0.01 //normalised histogram level from left, for background subtraction, for video and foto mode
+0.02  //blackpoint offset, added after background subtraction
+1  //circular mask as area for background subtraction (for small image circle): 0 - none, 1 - active
+0.9 //circular mask for background subtraction diameter, parts of image height
+0  //show circular mask for background subtraction for test: 0 - none, 1 – active
+1 //noise reduction, for both video and foto mode: 0 - none, 1 - bilateral filtering
+0.3 0.0  //noise reduction strength for video and foto mode, 0..1
+30 0.2 0.0  // midtone contrast enhancement for foto mode, detail radius, midtone width, strength, deactivated if strength=0
+1.5 0.0  // sharpen enhancement, sigma (size), amount, deactivated if amount=0 
+1 //circular mask for display (optic like): 0 - none, 1 - active for both video and foto mode
+50.0 //initial stretching factor: 1.0 is neutral, higher value is more stretching
+0.9  //star protection factor for stretching, 1 - no effect, 0.5-0.99 - stars are more linear, nebulas darker
+1.0 1.0 1.0  // White balance correction for RGB palette
+0  // use color correction matrix for RGB palette, 0 - don't use, 1 - use
+ 1.39 -0.36  -0.03  // R = a*R + b*G + c*B, RGB palette
+-0.4   1.7   -0.3   // G = a*R + b*G + c*B
+ 0.08 -0.74   1.66  // B = a*R + b*G + c*B
+1.0 0.0 0.0   // R = a*R + b*G + c*B, dualband palette
+0.6 0.1 0.1   // G = a*R + b*G + c*B
+0.0 0.8 0.4   // B = a*R + b*G + c*B
+0  // enhance bright stars, 0 - disabled, 1 - star "halos"
+20 0.02  // enhance bright stars: star "halos" radius in pixels, star "halos" strength 0..1
+0.3  // highlight protection activation: 0 - disabled, 0.02..1.0 - active
+4.0 1.5  // zoom value for focusing/zoom mode, for video and foto mode, 1..x
+1.0  // zoom value for display, if needed, 1..x
+x m + - p s f h  // control keys for eXit, Mode, stretch +, stretch -, Palette, Save, Focusing, show Histogram
+1  // main screen activation: 0 - deactivated (eyepiece only mode), 1 - active
+1  // screen GUI: 0 - none, 1 - active
+1  // show clock waiting symbol
+//--------------- AI noise reduction
+2   // AI noise reduction activation, 0 - none, 1 - active, 0.1-0.9 - mix of filtered/unfiltered, >1 – auto
+0.01 0.04 0.1 0.95  // automatic AI noise reduction parameters, noise min/max, strength min/max
+0   // activate AI noise reduction after n-th stacked frame
+train_13.json   // AI noise reduction model file
+0   // number of CPU threads used for AI filter, 0 - automatic detection, 1..n - use parameter
+//--------------- Eyepiece display
+0  //Eyepiece display activation, 0 for disabled, 1 for single picture, 2 for stereo
+2560 1440  //Eyepiece display resolution in pixel, bigger dimension, smaller dimension
+121 68  //Eyepiece display dimensions in mm, bigger dimension, smaller dimension
+61  //interpupillary distance in mm
+3 //image rotation for eyepiece display: 0 (same, as main screen), 1, 2, 3 (0, 90°, 180°, 270° clockwise)
+2500 500  //coordinates of a point on second display to move image window (opencv specific)
+0  //circular mask for eyepiece display (optic like): 0 - none, 1 - active for both video and foto mode

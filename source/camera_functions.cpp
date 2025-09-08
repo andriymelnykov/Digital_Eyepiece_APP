@@ -25,9 +25,14 @@ void check_cameras()
     else {
         // Read the number of connected cameras
         asi_connected_cameras = ASIGetNumOfConnectedCameras();
-        cout << "Number of connected cameras: " << asi_connected_cameras << endl;
-        logfile << "Number of connected cameras: " << asi_connected_cameras << endl;
-        if (asi_connected_cameras < 1) {
+        cout << "Number of connected ZWO cameras: " << asi_connected_cameras << endl;
+        logfile << "Number of connected ZWO cameras: " << asi_connected_cameras << endl;
+
+        svb_connected_cameras = SVBGetNumOfConnectedCameras();
+        cout << "Number of connected SVBony cameras: " << svb_connected_cameras << endl;
+        logfile << "Number of connected SVBony cameras: " << svb_connected_cameras << endl;
+
+        if ( (asi_connected_cameras < 1) && (svb_connected_cameras < 1) ) {
             cout << "No cameras found. Press Enter to close...";
             logfile << "No cameras found. Press Enter to close...";
             cin.get();
@@ -41,6 +46,8 @@ void check_cameras()
 
 void get_camera_properties()
 {
+    bayer_pattern = 0;  //default RGGB
+
     if (camera_from_file == 1) {
         asi_camera_info = (ASI_CAMERA_INFO**)malloc(sizeof(ASI_CAMERA_INFO*) * asi_connected_cameras);
         asi_camera_info[0] = (ASI_CAMERA_INFO*)malloc(sizeof(ASI_CAMERA_INFO));
@@ -51,38 +58,155 @@ void get_camera_properties()
     else {
         // Get each connected camera's properties into an array
         int get_property_success = 0;
-        asi_camera_info = (ASI_CAMERA_INFO**)malloc(sizeof(ASI_CAMERA_INFO*) * asi_connected_cameras);
-        //ASI_CAMERA_INFO** asi_camera_info = (ASI_CAMERA_INFO**)malloc(sizeof(ASI_CAMERA_INFO*) * asi_connected_cameras);
-        for (int i = 0; i < asi_connected_cameras; i++) {
-            asi_camera_info[i] = (ASI_CAMERA_INFO*)malloc(sizeof(ASI_CAMERA_INFO));
-            if (ASIGetCameraProperty(asi_camera_info[i], i) == ASI_SUCCESS) {
-                get_property_success = 1;
 
-                if (debug_flag == 1) {
-                    // Print camera's properties
-                    cout << "Camera " << i << endl;
-                    cout << "  ASI Camera Name: " << asi_camera_info[i]->Name << endl;
-                    cout << "  Camera ID: " << asi_camera_info[i]->CameraID << endl;
-                    cout << "  Width and Height: " << asi_camera_info[i]->MaxWidth << "x" << asi_camera_info[i]->MaxHeight << endl;
-                    cout << "  Color: " << (asi_camera_info[i]->IsColorCam == ASI_TRUE ? "Yes" : "No") << endl;
-                    cout << "  Bayer pattern: " << asi_camera_info[i]->BayerPattern << endl;
-                    cout << "  Pixel size: " << asi_camera_info[i]->PixelSize << " um" << endl;
-                    //printf("  e-/ADU: %1.2f\n", asi_camera_info[i]->ElecPerADU);
-                    cout << "  Bit depth: " << asi_camera_info[i]->BitDepth << endl;
-                    cout << "  Trigger cam: " << (asi_camera_info[i]->IsTriggerCam == 0 ? "No" : "Yes") << endl;
 
-                    logfile << "Camera " << i << endl;
-                    logfile << "  ASI Camera Name: " << asi_camera_info[i]->Name << endl;
-                    logfile << "  Camera ID: " << asi_camera_info[i]->CameraID << endl;
-                    logfile << "  Width and Height: " << asi_camera_info[i]->MaxWidth << "x" << asi_camera_info[i]->MaxHeight << endl;
-                    logfile << "  Color: " << (asi_camera_info[i]->IsColorCam == ASI_TRUE ? "Yes" : "No") << endl;
-                    logfile << "  Bayer pattern: " << asi_camera_info[i]->BayerPattern << endl;
-                    logfile << "  Pixel size: " << asi_camera_info[i]->PixelSize << "µm" << endl;
-                    logfile << "  Bit depth: " << asi_camera_info[i]->BitDepth << endl;
-                    logfile << "  Trigger cam: " << (asi_camera_info[i]->IsTriggerCam == 0 ? "No" : "Yes") << endl;
+        if (asi_connected_cameras > 0) {
+            asi_camera_info = (ASI_CAMERA_INFO**)malloc(sizeof(ASI_CAMERA_INFO*) * asi_connected_cameras);
+            for (int i = 0; i < asi_connected_cameras; i++) {
+                asi_camera_info[i] = (ASI_CAMERA_INFO*)malloc(sizeof(ASI_CAMERA_INFO));
+                ASI_ERROR_CODE ret = ASIGetCameraProperty(asi_camera_info[i], i);
+                if (ret == ASI_SUCCESS) {
+                    get_property_success = 1;
+
+                    if (asi_camera_info[i]->IsColorCam == ASI_TRUE)
+                        is_color_cam = true;
+                    else
+                        is_color_cam = false;
+
+                    bayer_pattern = asi_camera_info[i]->BayerPattern;
+                    //cout << "bayer int: " << bayer_pattern << endl;
+
+                    if (debug_flag == 1) {
+                        // Print camera's properties
+                        cout << "ZWO Camera " << i << endl;
+                        cout << "  ASI Camera Name: " << asi_camera_info[i]->Name << endl;
+                        cout << "  Camera ID: " << asi_camera_info[i]->CameraID << endl;
+                        cout << "  Width and Height: " << asi_camera_info[i]->MaxWidth << "x" << asi_camera_info[i]->MaxHeight << endl;
+                        cout << "  Color: " << (asi_camera_info[i]->IsColorCam == ASI_TRUE ? "Yes" : "No") << endl;
+                        cout << "  Bayer pattern: " << asi_camera_info[i]->BayerPattern << endl;
+                        cout << "  Pixel size: " << asi_camera_info[i]->PixelSize << " um" << endl;
+                        //printf("  e-/ADU: %1.2f\n", asi_camera_info[i]->ElecPerADU);
+                        cout << "  Bit depth: " << asi_camera_info[i]->BitDepth << endl;
+                        cout << "  Trigger cam: " << (asi_camera_info[i]->IsTriggerCam == 0 ? "No" : "Yes") << endl;
+
+                        logfile << "Camera " << i << endl;
+                        logfile << "  ASI Camera Name: " << asi_camera_info[i]->Name << endl;
+                        logfile << "  Camera ID: " << asi_camera_info[i]->CameraID << endl;
+                        logfile << "  Width and Height: " << asi_camera_info[i]->MaxWidth << "x" << asi_camera_info[i]->MaxHeight << endl;
+                        logfile << "  Color: " << (asi_camera_info[i]->IsColorCam == ASI_TRUE ? "Yes" : "No") << endl;
+                        logfile << "  Bayer pattern: " << asi_camera_info[i]->BayerPattern << endl;
+                        logfile << "  Pixel size: " << asi_camera_info[i]->PixelSize << "µm" << endl;
+                        logfile << "  Bit depth: " << asi_camera_info[i]->BitDepth << endl;
+                        logfile << "  Trigger cam: " << (asi_camera_info[i]->IsTriggerCam == 0 ? "No" : "Yes") << endl;
+                    }
+                }
+                else {
+                    cout << "Camera ZWO: " << i << endl;
+                    cout << "Error code: " << ret << endl;
+                    logfile << "Camera ZWO: " << i << endl;
+                    logfile << "Error code: " << ret << endl;
                 }
             }
         }
+
+
+
+        if (svb_connected_cameras > 0) {
+
+            svb_camera_info = (SVB_CAMERA_INFO**)malloc(sizeof(SVB_CAMERA_INFO*) * svb_connected_cameras);
+            svb_camera_property = (SVB_CAMERA_PROPERTY**)malloc(sizeof(SVB_CAMERA_PROPERTY*) * svb_connected_cameras);
+
+            for (int i = 0; i < svb_connected_cameras; i++) {
+                
+                svb_camera_info[i] = (SVB_CAMERA_INFO*)malloc(sizeof(SVB_CAMERA_INFO));
+
+                SVB_ERROR_CODE ret_info;
+                ret_info = SVBGetCameraInfo(svb_camera_info[i], i);
+                if (ret_info == SVB_SUCCESS)
+                {
+                    if (debug_flag == 1) {
+                        cout << "SVBony Friendly name: " << svb_camera_info[i]->FriendlyName << endl;
+                        cout << "Port type: " << svb_camera_info[i]->PortType << endl;
+                        cout << "SN: " << svb_camera_info[i]->CameraSN << endl;
+                        cout << "Device ID: " << svb_camera_info[i]->DeviceID << endl;
+                        cout << "Camera ID: " << svb_camera_info[i]->CameraID << endl;
+                        logfile << "SVBony Friendly name: " << svb_camera_info[i]->FriendlyName << endl;
+                        logfile << "Port type: " << svb_camera_info[i]->PortType << endl;
+                        logfile << "SN: " << svb_camera_info[i]->CameraSN << endl;
+                        logfile << "Device ID: " << svb_camera_info[i]->DeviceID << endl;
+                        logfile << "Camera ID: " << svb_camera_info[i]->CameraID << endl;
+                    }
+                }
+                else {
+                    cout << "Can not get info from SVBony camera: " << i << endl;
+                    cout << "Error code: " << ret_info << endl;
+                    logfile << "Can not get info from SVBony camera: " << i << endl;
+                    logfile << "Error code: " << ret_info << endl;
+                    cout << "Press Enter to close...";
+                    cin.get();
+                    exit(1); // return 1;
+                }
+                
+
+                /**/
+                SVB_ERROR_CODE ret_open;
+                ret_open = SVBOpenCamera(svb_camera_info[i]->CameraID);
+                if (ret_open != SVB_SUCCESS)
+                {
+                    cout << "Can not open SVBony camera: " << i << endl;
+                    cout << "Error code: " << ret_open << endl;
+                    logfile << "Can not open SVBony camera: " << i << endl;
+                    logfile << "Error code: " << ret_open << endl;
+                    cout << "Press Enter to close...";
+                    cin.get();
+                    exit(1); // return 1;
+                }/**/
+
+                svb_camera_property[i] = (SVB_CAMERA_PROPERTY*)malloc(sizeof(SVB_CAMERA_PROPERTY));
+                SVB_ERROR_CODE ret_property = SVBGetCameraProperty(svb_camera_info[cam]->CameraID, svb_camera_property[i]);
+                if (ret_property == SVB_SUCCESS) {
+                    get_property_success = 1;
+
+                    if (svb_camera_property[i]->IsColorCam == SVB_TRUE)
+                        is_color_cam = true;
+                    else
+                        is_color_cam = false;
+
+                    bayer_pattern = svb_camera_property[i]->BayerPattern;
+
+                    if (debug_flag == 1) {
+                        // Print camera's properties
+                        cout << "SVB Camera " << i << endl;
+                        cout << "  Width and Height: " << svb_camera_property[i]->MaxWidth << "x" << svb_camera_property[i]->MaxHeight << endl;
+                        cout << "  Color: " << (svb_camera_property[i]->IsColorCam == SVB_TRUE ? "Yes" : "No") << endl;
+                        cout << "  Bayer pattern: " << svb_camera_property[i]->BayerPattern << endl;
+                        cout << "  Bit depth: " << svb_camera_property[i]->MaxBitDepth << endl;
+                        cout << "  Trigger cam: " << (svb_camera_property[i]->IsTriggerCam == 0 ? "No" : "Yes") << endl;
+
+                        logfile << "Camera " << i << endl;
+                        logfile << "  Width and Height: " << svb_camera_property[i]->MaxWidth << "x" << svb_camera_property[i]->MaxHeight << endl;
+                        logfile << "  Color: " << (svb_camera_property[i]->IsColorCam == SVB_TRUE ? "Yes" : "No") << endl;
+                        logfile << "  Bayer pattern: " << svb_camera_property[i]->BayerPattern << endl;
+                        logfile << "  Bit depth: " << svb_camera_property[i]->MaxBitDepth << endl;
+                        logfile << "  Trigger cam: " << (svb_camera_property[i]->IsTriggerCam == 0 ? "No" : "Yes") << endl;
+
+                    }
+                }
+                else {
+                    cout << "Camera SVBony: " << i << endl;
+                    cout << "Error code: " << ret_property << endl;
+                    logfile << "Camera SVBony: " << i << endl;
+                    logfile << "Error code: " << ret_property << endl;
+                }
+
+                SVBCloseCamera(svb_camera_info[i]->CameraID);
+
+            }
+        }
+
+
+
+
         if (get_property_success == 0) {
             cout << "Can not get camera properties" << endl;
             logfile << "Can not get camera properties" << endl;
@@ -90,6 +214,10 @@ void get_camera_properties()
             cin.get();
             exit(1); // return 1;
         }
+        
+
+
+
 
     }
     
@@ -103,12 +231,21 @@ void get_camera_properties()
     //image_size = asi_camera_info[cam]->MaxWidth * asi_camera_info[cam]->MaxHeight / bin / bin / monobin_k / monobin_k / ROI_zoom_k / ROI_zoom_k;
     //image_size *= image_bytes;
  
-    camera_image_width = asi_camera_info[cam]->MaxWidth / bin / monobin_k / ROI_zoom_k;
-    camera_image_height = asi_camera_info[cam]->MaxHeight / bin / monobin_k / ROI_zoom_k;
+    if (asi_connected_cameras > 0) {
+        camera_image_width = asi_camera_info[cam]->MaxWidth / bin / monobin_k / ROI_zoom_k;
+        camera_image_height = asi_camera_info[cam]->MaxHeight / bin / monobin_k / ROI_zoom_k;
+    }
+    else if (svb_connected_cameras > 0) {
+        camera_image_width = svb_camera_property[cam]->MaxWidth / bin / monobin_k / ROI_zoom_k;
+        camera_image_height = svb_camera_property[cam]->MaxHeight / bin / monobin_k / ROI_zoom_k;
+    }
+    
+        
     if (ROI_zoom != 0) {
         camera_image_width = camera_image_width / 8 * 8;
         camera_image_height = camera_image_height / 2 * 2;
     }
+
 
     image_size = camera_image_width * camera_image_height;
     image_size *= image_bytes;
@@ -120,6 +257,7 @@ void get_camera_properties()
         logfile << "Using image dimensions: " << camera_image_width << "x" << camera_image_height << endl;
     }
 
+    asi_image = (unsigned char*)malloc(sizeof(unsigned char) * image_size);  //used for all cameras
 }
 
 
@@ -131,58 +269,126 @@ void open_init_camera()
         printf("Not opening camera\n");
     }
     else {
-        // Open camera
-        cout << "Opening camera..." << endl;
-        logfile << "Opening camera..." << endl;
-        if (ASIOpenCamera(asi_camera_info[cam]->CameraID) != ASI_SUCCESS) {
-            cout << "Error opening camera" << endl;
-            logfile << "Error opening camera" << endl;
-            cout << "Press Enter to close...";
-            cin.get();
-            exit(1);  // return 1;
-        }
 
-        // Get camera's controls
-        asi_num_controls = 0;
-        ASIGetNumOfControls(asi_camera_info[cam]->CameraID, &asi_num_controls);
-        if (asi_num_controls == 0) {
-            cout << "Error num of controls 0" << endl;
-            logfile << "Error num of controls 0" << endl;
-            abort_app();
-        }
-        //cout << asi_num_controls << endl;
-        asi_control_caps = (ASI_CONTROL_CAPS**)malloc(sizeof(ASI_CONTROL_CAPS*) * asi_num_controls);
-        //ASI_CONTROL_CAPS** asi_control_caps = (ASI_CONTROL_CAPS**)malloc(sizeof(ASI_CONTROL_CAPS*) * asi_num_controls);
-        for (int i = 0; i < asi_num_controls; i++) {
-            asi_control_caps[i] = (ASI_CONTROL_CAPS*)malloc(sizeof(ASI_CONTROL_CAPS));
-            if (ASIGetControlCaps(asi_camera_info[cam]->CameraID, i, asi_control_caps[i]) == ASI_SUCCESS) {
-                // Print camera's properties
-                if (debug_flag == 1) {
-                    cout << "  Property " << asi_control_caps[i]->Name << ": [" << asi_control_caps[i]->MinValue << " " << asi_control_caps[i]->MaxValue
-                        << "], default = " << asi_control_caps[i]->DefaultValue << endl
-                        << "   is writable: " << asi_control_caps[i]->IsWritable << endl
-                        << "   description: " << asi_control_caps[i]->Description << endl;
-                    logfile << "  Property " << asi_control_caps[i]->Name << ": [" << asi_control_caps[i]->MinValue << " " << asi_control_caps[i]->MaxValue
-                        << "], default = " << asi_control_caps[i]->DefaultValue << endl
-                        << "   is writable: " << asi_control_caps[i]->IsWritable << endl
-                        << "   description: " << asi_control_caps[i]->Description << endl;
+        if (asi_connected_cameras > 0) {
+            cout << "Opening ZWO camera..." << endl;
+            logfile << "Opening ZWO camera..." << endl;
+
+            if (ASIOpenCamera(asi_camera_info[cam]->CameraID) != ASI_SUCCESS) {
+                cout << "Error opening ZWO camera" << endl;
+                logfile << "Error opening ZWO camera" << endl;
+                cout << "Press Enter to close...";
+                cin.get();
+                exit(1);  // return 1;
+            }
+
+            // Get camera's controls
+            asi_num_controls = 0;
+            ASIGetNumOfControls(asi_camera_info[cam]->CameraID, &asi_num_controls);
+            if (asi_num_controls == 0) {
+                cout << "Error num of controls 0" << endl;
+                logfile << "Error num of controls 0" << endl;
+                abort_app();
+            }
+
+            //cout << asi_num_controls << endl;
+            asi_control_caps = (ASI_CONTROL_CAPS**)malloc(sizeof(ASI_CONTROL_CAPS*) * asi_num_controls);
+            //ASI_CONTROL_CAPS** asi_control_caps = (ASI_CONTROL_CAPS**)malloc(sizeof(ASI_CONTROL_CAPS*) * asi_num_controls);
+            for (int i = 0; i < asi_num_controls; i++) {
+                asi_control_caps[i] = (ASI_CONTROL_CAPS*)malloc(sizeof(ASI_CONTROL_CAPS));
+                if (ASIGetControlCaps(asi_camera_info[cam]->CameraID, i, asi_control_caps[i]) == ASI_SUCCESS) {
+                    // Print camera's properties
+                    if (debug_flag == 1) {
+                        cout << "  Property " << asi_control_caps[i]->Name << ": [" << asi_control_caps[i]->MinValue << " " << asi_control_caps[i]->MaxValue
+                            << "], default = " << asi_control_caps[i]->DefaultValue << endl
+                            << "   is writable: " << asi_control_caps[i]->IsWritable << endl
+                            << "   description: " << asi_control_caps[i]->Description << endl
+                            << "   control type: " << asi_control_caps[i]->ControlType << endl;
+                        logfile << "  Property " << asi_control_caps[i]->Name << ": [" << asi_control_caps[i]->MinValue << " " << asi_control_caps[i]->MaxValue
+                            << "], default = " << asi_control_caps[i]->DefaultValue << endl
+                            << "   is writable: " << asi_control_caps[i]->IsWritable << endl
+                            << "   description: " << asi_control_caps[i]->Description << endl
+                            << "   control type: " << asi_control_caps[i]->ControlType << endl;
+                    }
+                }
+                else {
+                    cout << "Error getting ZWO control caps" << endl;
+                    logfile << "Error getting ZWO control caps" << endl;
+                    abort_app();
                 }
             }
-            else {
-                cout << "Error getting control caps" << endl;
-                logfile << "Error getting control caps" << endl;
+
+            // Initialize camera
+            cout << "Initializing camera..." << endl;
+            logfile << "Initializing camera..." << endl;
+            if (ASIInitCamera(asi_camera_info[cam]->CameraID) != ASI_SUCCESS) {
+                cout << "Error initializing camera" << endl;
+                logfile << "Error initializing camera" << endl;
                 abort_app();
             }
         }
 
-        // Initialize camera
-        cout << "Initializing camera..." << endl;
-        logfile << "Initializing camera..." << endl;
-        if (ASIInitCamera(asi_camera_info[cam]->CameraID) != ASI_SUCCESS) {
-            cout << "Error initializing camera" << endl;
-            logfile << "Error initializing camera" << endl;
-            abort_app();
+        else if (svb_connected_cameras > 0) {
+            cout << "Opening SVB camera..." << endl;
+            logfile << "Opening SVB camera..." << endl;
+
+            if (SVBOpenCamera(svb_camera_info[cam]->CameraID) != SVB_SUCCESS) {
+                cout << "Error opening SVB camera" << endl;
+                logfile << "Error opening SVB camera" << endl;
+                cout << "Press Enter to close...";
+                cin.get();
+                exit(1);  // return 1;
+            }
+
+            // Get camera's controls
+            svb_num_controls = 0;
+            SVBGetNumOfControls(svb_camera_info[cam]->CameraID, &svb_num_controls);
+            if (svb_num_controls == 0) {
+                cout << "Error num of controls 0" << endl;
+                logfile << "Error num of controls 0" << endl;
+                abort_app();
+            }
+
+            svb_control_caps = (SVB_CONTROL_CAPS**)malloc(sizeof(SVB_CONTROL_CAPS*) * svb_num_controls);
+            for (int i = 0; i < svb_num_controls; i++) {
+                svb_control_caps[i] = (SVB_CONTROL_CAPS*)malloc(sizeof(SVB_CONTROL_CAPS));
+                if (SVBGetControlCaps(svb_camera_info[cam]->CameraID, i, svb_control_caps[i]) == SVB_SUCCESS) {
+                    // Print camera's properties
+                    if (debug_flag == 1) {
+                        cout << "  Property " << svb_control_caps[i]->Name << ": [" << svb_control_caps[i]->MinValue << " " << svb_control_caps[i]->MaxValue
+                            << "], default = " << svb_control_caps[i]->DefaultValue << endl
+                            << "   is writable: " << svb_control_caps[i]->IsWritable << endl
+                            << "   description: " << svb_control_caps[i]->Description << endl
+                            << "   control type: " << svb_control_caps[i]->ControlType << endl;
+                        logfile << "  Property " << svb_control_caps[i]->Name << ": [" << svb_control_caps[i]->MinValue << " " << svb_control_caps[i]->MaxValue
+                            << "], default = " << svb_control_caps[i]->DefaultValue << endl
+                            << "   is writable: " << svb_control_caps[i]->IsWritable << endl
+                            << "   description: " << svb_control_caps[i]->Description << endl
+                            << "   control type: " << svb_control_caps[i]->ControlType << endl;
+                    }
+                }
+                else {
+                    cout << "Error getting SVB control caps" << endl;
+                    logfile << "Error getting SVB control caps" << endl;
+                    abort_app();
+                }
+            }
+
+            // Initialize camera
+            /*
+            cout << "Initializing camera..." << endl;
+            logfile << "Initializing camera..." << endl;
+            if (SVBInitCamera(svb_camera_info[cam]->CameraID) != SVB_SUCCESS) {
+                cout << "Error initializing camera" << endl;
+                logfile << "Error initializing camera" << endl;
+                abort_app();
+            }/**/
         }
+
+
+
+
+       
     }
 }
 
@@ -198,7 +404,11 @@ void close_camera()
         // Close camera
         cout << "Closing camera" << endl;
         logfile << "Closing camera" << endl;
-        ASICloseCamera(asi_camera_info[cam]->CameraID);
+
+        if (asi_connected_cameras > 0)
+            ASICloseCamera(asi_camera_info[cam]->CameraID);
+        if (svb_connected_cameras > 0)
+            SVBCloseCamera(svb_camera_info[cam]->CameraID);
     }
 }
 
@@ -210,6 +420,7 @@ void set_camera_controls()
         exposure_time = exposure_time_v;
         gain = gain_v;
         WB_R = WB_R_v;
+        WB_G = WB_G_v;
         WB_B = WB_B_v;
         offset = offset_v;
         //bandwidth = bandwidth_v;
@@ -221,6 +432,7 @@ void set_camera_controls()
         exposure_time = exposure_time_f;
         gain = gain_f;
         WB_R = WB_R_f;
+        WB_G = WB_G_f;
         WB_B = WB_B_f;
         offset = offset_f;
         //bandwidth = bandwidth_f;
@@ -249,90 +461,209 @@ void set_camera_controls()
     //image_size *= image_bytes;
 
     //printf("Image size: %d bytes\n", image_size);
-    asi_image = (unsigned char*)malloc(sizeof(unsigned char) * image_size);
+
+    //asi_image = (unsigned char*)malloc(sizeof(unsigned char) * image_size);  //used for all cameras
+
+
 
 
     if (camera_from_file == 1) {
         //do nothing
     }
+
     else {
-        // Set image type
-        cout << "Set image type" << endl;
-        logfile << "Set image type" << endl;
-        if (image_bytes == 1)
-            //ASISetROIFormat(asi_camera_info[cam]->CameraID, asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, bin, ASI_IMG_RAW8);
-            ASISetROIFormat(asi_camera_info[cam]->CameraID, camera_image_width, camera_image_height, bin, ASI_IMG_RAW8);
-            //here ASISetStartPos should be used for ROI zoom
-        else if (image_bytes == 2)
-            //ASISetROIFormat(asi_camera_info[cam]->CameraID, asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, bin, ASI_IMG_RAW16);
-            ASISetROIFormat(asi_camera_info[cam]->CameraID, camera_image_width, camera_image_height, bin, ASI_IMG_RAW16);
-            //here ASISetStartPos should be used for ROI zoom
-        else
-        {
-            cout << "byte per pixel value wrong" << endl;
-            logfile << "byte per pixel value wrong" << endl;
-            cout << "Press Enter to close...";
-            abort_app();
+        if (asi_connected_cameras > 0) {
+            
+            ASI_ERROR_CODE ret;
+
+            // Set image type
+            cout << "Set image type" << endl;
+            logfile << "Set image type" << endl;
+            if (image_bytes == 1) {
+                //ASISetROIFormat(asi_camera_info[cam]->CameraID, asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, bin, ASI_IMG_RAW8);
+                ret = ASISetROIFormat(asi_camera_info[cam]->CameraID, camera_image_width, camera_image_height, bin, ASI_IMG_RAW8);
+                logfile << "return code: " << ret << endl;
+                //here ASISetStartPos should be used for ROI zoom
+            }
+            else if (image_bytes == 2) {
+                //ASISetROIFormat(asi_camera_info[cam]->CameraID, asi_camera_info[cam]->MaxWidth / bin / monobin_k, asi_camera_info[cam]->MaxHeight / bin / monobin_k, bin, ASI_IMG_RAW16);
+                ret = ASISetROIFormat(asi_camera_info[cam]->CameraID, camera_image_width, camera_image_height, bin, ASI_IMG_RAW16);
+                logfile << "return code: " << ret << endl;
+                //here ASISetStartPos should be used for ROI zoom
+            }
+            else
+            {
+                cout << "byte per pixel value wrong" << endl;
+                logfile << "byte per pixel value wrong" << endl;
+                cout << "Press Enter to close...";
+                abort_app();
+            }
+
+            // Set exposure time
+            cout << "Set exposure time, ms: " << (exposure_time / 1000) << endl;
+            logfile << "Set exposure time, ms: " << (exposure_time / 1000) << endl;
+            ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_EXPOSURE, exposure_time, ASI_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set gain
+            cout << "Set gain: " << gain << endl;
+            logfile << "Set gain: " << gain << endl;
+            ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_GAIN, gain, ASI_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set WB
+            cout << "Set WB_R, WB_B: " << WB_R << " " << WB_B << endl;
+            logfile << "Set WB_R, WB_B: " << WB_R << " " << WB_B << endl;
+            ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_WB_R, WB_R, ASI_FALSE);
+            logfile << "return code: " << ret << endl;
+            ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_WB_B, WB_B, ASI_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set offset
+            cout << "Set offset: " << offset << endl;
+            logfile << "Set offset: " << offset << endl;
+            ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_OFFSET, offset, ASI_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set bandwidth
+            cout << "Set bandwidth: " << bandwidth << endl;
+            logfile << "Set bandwidth: " << bandwidth << endl;
+            ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_BANDWIDTHOVERLOAD, bandwidth, ASI_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set speed mode
+            if ((state == foto_state) || ((state == video_state) && (highspeed_v == 0))) {
+                cout << "Set high speed mode: " << 0 << endl;
+                logfile << "Set high speed mode: " << 0 << endl;
+                ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_HIGH_SPEED_MODE, 0, ASI_FALSE);
+                logfile << "return code: " << ret << endl;
+            }
+            else {
+                cout << "Set high speed mode: " << highspeed_v << endl;
+                logfile << "Set high speed mode: " << highspeed_v << endl;
+                ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_HIGH_SPEED_MODE, highspeed_v, ASI_FALSE);
+                logfile << "return code: " << ret << endl;
+            }
+
+            // Set monobin
+            cout << "Set monobin: " << monobin << endl;
+            logfile << "Set monobin: " << monobin << endl;
+            ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_MONO_BIN, monobin, ASI_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set flip
+            cout << "Set no flip" << endl;
+            logfile << "Set no flip" << endl;
+            ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_FLIP, ASI_FLIP_NONE, ASI_FALSE);
+            logfile << "return code: " << ret << endl;
+            // -------------------------
+
+
+            if (cooler_activation == 1) {
+                // Set target temperature
+                cout << "Set target temperature: " << target_temperature << endl;
+                logfile << "Set target temperature: " << target_temperature << endl;
+                ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_TARGET_TEMP, target_temperature, ASI_FALSE);
+                logfile << "return code: " << ret << endl;
+                // Set cooler active
+                cout << "Set cooler active" << endl;
+                logfile << "Set cooler active" << endl;
+                ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_COOLER_ON, 1, ASI_FALSE);
+                logfile << "return code: " << ret << endl;
+                // Set fan active
+                cout << "Set fan active" << endl;
+                logfile << "Set fan active" << endl;
+                ret = ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_FAN_ON, 1, ASI_FALSE);
+                logfile << "return code: " << ret << endl;
+            }
+
+            // -------------------------
         }
-        // Set exposure time
-        cout << "Set exposure time, ms: " << (exposure_time / 1000) << endl;
-        logfile << "Set exposure time, ms: " << (exposure_time / 1000) << endl;
-        ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_EXPOSURE, exposure_time, ASI_FALSE);
-        // Set gain
-        cout << "Set gain: " << gain << endl;
-        logfile << "Set gain: " << gain << endl;
-        ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_GAIN, gain, ASI_FALSE);
-        // Set WB
-        cout << "Set WB_R, WB_B: " << WB_R << " " << WB_B << endl;
-        logfile << "Set WB_R, WB_B: " << WB_R << " " << WB_B << endl;
-        ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_WB_R, WB_R, ASI_FALSE);
-        ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_WB_B, WB_B, ASI_FALSE);
-        // Set offset
-        cout << "Set offset: " << offset << endl;
-        logfile << "Set offset: " << offset << endl;
-        ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_OFFSET, offset, ASI_FALSE);
-        // Set bandwidth
-        cout << "Set bandwidth: " << bandwidth << endl;
-        logfile << "Set bandwidth: " << bandwidth << endl;
-        ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_BANDWIDTHOVERLOAD, bandwidth, ASI_FALSE);
-        // Set speed mode
-        if ((state == foto_state) || ((state == video_state) && (highspeed_v == 0))) {
-            cout << "Set high speed mode: " << 0 << endl;
-            logfile << "Set high speed mode: " << 0 << endl;
-            ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_HIGH_SPEED_MODE, 0, ASI_FALSE);
+
+        else if (svb_connected_cameras > 0) {
+
+            SVB_ERROR_CODE ret;
+
+            // Set image type
+            cout << "Set image type" << endl;
+            logfile << "Set image type" << endl;
+            if (image_bytes == 1) {
+                ret = SVBSetROIFormat(svb_camera_info[cam]->CameraID, 0, 0, camera_image_width, camera_image_height, bin);
+                logfile << "return code: " << ret << endl;
+                //here x,y StartPos should be used for ROI zoom
+                ret = SVBSetOutputImageType(svb_camera_info[cam]->CameraID, SVB_IMG_RAW8);
+                logfile << "return code: " << ret << endl;
+            }
+            else if (image_bytes == 2) {
+                ret = SVBSetROIFormat(svb_camera_info[cam]->CameraID, 0, 0, camera_image_width, camera_image_height, bin);
+                logfile << "return code: " << ret << endl;
+                //here x,y StartPos should be used for ROI zoom
+                ret = SVBSetOutputImageType(svb_camera_info[cam]->CameraID, SVB_IMG_RAW16);
+                logfile << "return code: " << ret << endl;
+            }
+            else
+            {
+                cout << "byte per pixel value wrong" << endl;
+                logfile << "byte per pixel value wrong" << endl;
+                cout << "Press Enter to close...";
+                abort_app();
+            }
+            // Set exposure time
+            cout << "Set exposure time, ms: " << (exposure_time / 1000) << endl;
+            logfile << "Set exposure time, ms: " << (exposure_time / 1000) << endl;
+            ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_EXPOSURE, exposure_time, SVB_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set gain
+            cout << "Set gain: " << gain << endl;
+            logfile << "Set gain: " << gain << endl;
+            ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_GAIN, gain, SVB_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set WB
+            cout << "Set WB_R, WB_G, WB_B: " << WB_R << " " << WB_G << " " << WB_B << endl;
+            logfile << "Set WB_R, WB_G, WB_B: " << WB_R << " " << WB_G << " " << WB_B << endl;
+            ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_WB_R, WB_R, SVB_FALSE);
+            logfile << "return code: " << ret << endl;
+            ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_WB_G, WB_G, SVB_FALSE);
+            logfile << "return code: " << ret << endl;
+            ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_WB_B, WB_B, SVB_FALSE);
+            logfile << "return code: " << ret << endl;
+
+            // Set offset
+            cout << "Set offset: " << offset << endl;
+            logfile << "Set offset: " << offset << endl;
+            ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_BLACK_LEVEL, offset, SVB_FALSE);
+            logfile << "return code: " << ret << endl;
+                        
+            // Set flip
+            cout << "Set no flip" << endl;
+            logfile << "Set no flip" << endl;
+            ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_FLIP, SVB_FLIP_NONE, SVB_FALSE);
+            logfile << "return code: " << ret << endl;
+            // -------------------------
+
+
+            if (cooler_activation == 1) {
+                // Set target temperature
+                cout << "Set target temperature: " << target_temperature << endl;
+                logfile << "Set target temperature: " << target_temperature << endl;
+                ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_TARGET_TEMPERATURE, target_temperature*10, SVB_FALSE);
+                logfile << "return code: " << ret << endl;
+                // Set cooler active
+                cout << "Set cooler active" << endl;
+                logfile << "Set cooler active" << endl;
+                ret = SVBSetControlValue(svb_camera_info[cam]->CameraID, SVB_COOLER_ENABLE, 1, SVB_FALSE);
+                logfile << "return code: " << ret << endl;
+            }
+
+            cout << "Set camera mode" << endl;
+            logfile << "Set camera mode" << endl;
+            ret = SVBSetCameraMode(svb_camera_info[cam]->CameraID, SVB_MODE_NORMAL);
+            logfile << "return code: " << ret << endl;
+
+            // -------------------------
         }
-        else {
-            cout << "Set high speed mode: " << highspeed_v << endl;
-            logfile << "Set high speed mode: " << highspeed_v << endl;
-            ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_HIGH_SPEED_MODE, highspeed_v, ASI_FALSE);
-        }
-        // Set monobin
-        cout << "Set monobin: " << monobin << endl;
-        logfile << "Set monobin: " << monobin << endl;
-        ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_MONO_BIN, monobin, ASI_FALSE);
-        // Set flip
-        cout << "Set no flip" << endl;
-        logfile << "Set no flip" << endl;
-        ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_FLIP, ASI_FLIP_NONE, ASI_FALSE);
-        // -------------------------
-        
-        
-        if (cooler_activation == 1) {
-            // Set target temperature
-            cout << "Set target temperature: " << target_temperature << endl;
-            logfile << "Set target temperature: " << target_temperature << endl;
-            ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_TARGET_TEMP, target_temperature, ASI_FALSE);
-            // Set cooler active
-            cout << "Set cooler active" << endl;
-            logfile << "Set cooler active" << endl;
-            ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_COOLER_ON, 1, ASI_FALSE);
-            // Set fan active
-            cout << "Set fan active" << endl;
-            logfile << "Set fan active" << endl;
-            ASISetControlValue(asi_camera_info[cam]->CameraID, ASI_FAN_ON, 1, ASI_FALSE);
-        }
-        
-        // -------------------------
     }
 }
 
@@ -374,18 +705,32 @@ void  start_video()
     else {
         cout << "Start video..." << endl;
         logfile << "Start video..." << endl;
-        if (ASIStartVideoCapture(asi_camera_info[cam]->CameraID) != ASI_SUCCESS) {
-            cout << "Cannot start video." << endl;
-            logfile << "Cannot start video." << endl;
-            abort_app();
+
+        if (asi_connected_cameras > 0) {
+            if (ASIStartVideoCapture(asi_camera_info[cam]->CameraID) != ASI_SUCCESS) {
+                cout << "Cannot start ZWO video." << endl;
+                logfile << "Cannot start ZWO video." << endl;
+                abort_app();
+            }
         }
+
+        else if (svb_connected_cameras > 0) {
+            if (SVBStartVideoCapture(svb_camera_info[cam]->CameraID) != SVB_SUCCESS) {
+                cout << "Cannot start SVB video." << endl;
+                logfile << "Cannot start SVB video." << endl;
+                abort_app();
+            }
+        }
+
     }
 }
 
 
 
-void get_video_frame()
+int get_video_frame()
 {
+    int get_frame_success = 0;
+
     if (debug_flag == 1) {
         cout << "Get video frame..." << endl;
         logfile << "Get video frame..." << endl;
@@ -393,20 +738,51 @@ void get_video_frame()
 
     if (camera_from_file == 1) {
         //do nothing
-        std::this_thread::sleep_for(std::chrono::microseconds(exposure_time_v));
+        std::this_thread::sleep_for(std::chrono::microseconds(exposure_time));
     }
     else {
-        if (debug_flag == 1) {
-            cout << "Get video frame" << endl;
-            logfile << "Get video frame" << endl;
+
+        if (asi_connected_cameras > 0) {
+            if (state == video_state) {
+                if (ASIGetVideoData(asi_camera_info[cam]->CameraID, asi_image, image_size, (exposure_time / 1000 * 2 + 500)) != ASI_SUCCESS) {
+                    cout << "Cannot get ZWO video frame." << endl;
+                    logfile << "Cannot get ZWO video frame." << endl;
+                    abort_app();
+                }
+                get_frame_success = 1;
+            }
+            else {
+                //int ret = ASIGetVideoData(asi_camera_info[cam]->CameraID, asi_image, image_size, 500);
+                if (ASIGetVideoData(asi_camera_info[cam]->CameraID, asi_image, image_size, 500) != ASI_SUCCESS)
+                //if (ret != 0)
+                    get_frame_success = 0;
+                else
+                    get_frame_success = 1;
+
+                //cout << "return code: " << ret << endl;
+            }
         }
 
-        if (ASIGetVideoData(asi_camera_info[cam]->CameraID, asi_image, image_size, 1000) != ASI_SUCCESS) {
-            cout << "Cannot get video frame." << endl;
-            logfile << "Cannot get video frame." << endl;
-            abort_app();
+        else if (svb_connected_cameras > 0) {
+            if (state == video_state) {
+                if (SVBGetVideoData(svb_camera_info[cam]->CameraID, asi_image, image_size, (exposure_time / 1000 * 2 + 500)) != SVB_SUCCESS) {
+                    cout << "Cannot get SVB video frame." << endl;
+                    logfile << "Cannot get SVB video frame." << endl;
+                    abort_app();
+                }
+                get_frame_success = 1;
+            }
+            else {
+                if (SVBGetVideoData(svb_camera_info[cam]->CameraID, asi_image, image_size, 500) != SVB_SUCCESS)
+                    get_frame_success = 0;
+                else
+                    get_frame_success = 1;
+            }
         }
+
     }
+
+    return get_frame_success;
 }
 
 
@@ -419,11 +795,23 @@ void stop_video()
     else {
         cout << "Stop video..." << endl;
         logfile << "Stop video..." << endl;
-        if (ASIStopVideoCapture(asi_camera_info[cam]->CameraID) != ASI_SUCCESS) {
-            cout << "Cannot stop video." << endl;
-            logfile << "Cannot stop video." << endl;
-            abort_app();
+
+        if (asi_connected_cameras > 0) {
+            if (ASIStopVideoCapture(asi_camera_info[cam]->CameraID) != ASI_SUCCESS) {
+                cout << "Cannot stop ZWO video." << endl;
+                logfile << "Cannot stop ZWO video." << endl;
+                abort_app();
+            }
         }
+
+        else if (svb_connected_cameras > 0) {
+            if (SVBStopVideoCapture(svb_camera_info[cam]->CameraID) != SVB_SUCCESS) {
+                cout << "Cannot stop SVB video." << endl;
+                logfile << "Cannot stop SVB video." << endl;
+                abort_app();
+            }
+        }
+
     }
 }
 
@@ -485,6 +873,9 @@ void start_exposure()
                     asi_image[i * 2 + 1] = t;
                     p2[i] = (uint16_t)((int32_t)p[i] + 32768);   // see how unsigned 16 bit is stored as signed + offset in FITS file format
                 }
+
+                //std::this_thread::sleep_for(std::chrono::microseconds(exposure_time_v));
+                std::this_thread::sleep_for(std::chrono::milliseconds(400));
             }
             else {
                 printf("Couldn't find file frame_v.fits\n");
@@ -604,9 +995,10 @@ void get_config(char* filename)
     auto_save_pictures_n = 1;
 
     //-------------------Default Video Parameters
-    exposure_time_v = 200000; // us
+    exposure_time_v = 400000; // us
     gain_v = 600;
     WB_R_v = 50;
+    WB_G_v = 50;
     WB_B_v = 50;
     offset_v = 100; 
     highspeed_v = 1;
@@ -622,6 +1014,7 @@ void get_config(char* filename)
     exposure_time_f = 4000000; // us
     gain_f = 600;
     WB_R_f = 50;
+    WB_G_f = 50;
     WB_B_f = 50;
     offset_f = 100;
     dark_f_hotpixel_flag = 0;
@@ -640,6 +1033,9 @@ void get_config(char* filename)
     bin = 2;
     image_bytes = 2;  // 1 for RAW8, 2 for RAW16
     bandwidth = 100;
+
+    hot_pixel_sigma = 7.0;
+
     flat_inv_factor = 0.0;
     ROI_zoom = 0;
 
@@ -655,6 +1051,7 @@ void get_config(char* filename)
     background_comp_flag = 2;
     black_level_value_v = 0.1;
     black_level_value_f = 0.1;
+    black_point_offset = 0.01;
 
 
     circular_mask_background_flag = 1;
@@ -665,9 +1062,9 @@ void get_config(char* filename)
     filter_strength_1 = 0.3;
     filter_strength_2 = 0.2;
 
-    CLAHE_tiles_size = 8;
-    CLAHE_clip_limit = 2.0;
-    CLAHE_amount = 0.0;
+    midtone_radius = 20;
+    midtone_width = 0.2;
+    midtone_strength = 0.0;
 
     sharpen_sigma = 2.0;
     sharpen_amount = 0.5;
@@ -689,7 +1086,10 @@ void get_config(char* filename)
     star_blob_radius = 20;
     star_blob_strength = 0.2;
 
+    highlight_protection_par = 0.4;
+
     focusing_zoom_value = 4.0;
+    zoom_value = 1.5;
 
     display_zoom_value = 1.0;
     display_zoom_value_stored = 1.0;
@@ -703,11 +1103,20 @@ void get_config(char* filename)
     key_focusing = (int)'f';   //focusing zoom
     key_histogram = (int)'h';   //show histogram
 
+    main_display_flag = 1;
+
     GUI_flag = 1;
+
+    show_clock_flag = 0;
 
     //--------------- AI noise reduction
 
     AI_noise_factor = 0;
+
+    AI_noise_min = 0.01;
+    AI_noise_max = 0.04;
+    AI_noise_factor_min = 0.1;
+    AI_noise_factor_max = 0.95;
     
     AI_noise_frames = 1;
     
@@ -792,6 +1201,12 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
+        iss >> WB_G_v;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
         iss >> WB_B_v;
         iss.str("");
 
@@ -867,6 +1282,12 @@ void get_config(char* filename)
         //cout << "line: " << line;
         iss << line;
         iss >> WB_R_f;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> WB_G_f;
         iss.str("");
 
         getline(myfile, line);
@@ -961,6 +1382,12 @@ void get_config(char* filename)
         iss >> bandwidth;
         iss.str("");
 
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> hot_pixel_sigma;
+        iss.str("");
+
         /*
         getline(myfile, line);
         //cout << "line: " << line;
@@ -1027,6 +1454,12 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
+        iss >> black_point_offset;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
         iss >> circular_mask_background_flag;
         iss.str("");
 
@@ -1057,7 +1490,7 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
-        iss >> CLAHE_tiles_size >> CLAHE_clip_limit >> CLAHE_amount;
+        iss >> midtone_radius >> midtone_width >> midtone_strength;
         iss.str("");
 
         getline(myfile, line);
@@ -1147,13 +1580,13 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
-        iss >> highlight_protection_flag;
+        iss >> highlight_protection_par;
         iss.str("");
 
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
-        iss >> focusing_zoom_value;
+        iss >> focusing_zoom_value >> zoom_value;
         iss.str("");
 
         getline(myfile, line);
@@ -1181,9 +1614,23 @@ void get_config(char* filename)
         getline(myfile, line);
         //cout << "line: " << line;
         iss << line;
+        iss >> main_display_flag;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
         iss >> GUI_flag;
         iss.str("");
 
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> show_clock_flag;
+        iss.str("");
+
+        
 
 
         getline(myfile, line); //dummy line //AI noise reduction
@@ -1193,6 +1640,12 @@ void get_config(char* filename)
         //cout << "line: " << line;
         iss << line;
         iss >> AI_noise_factor;
+        iss.str("");
+
+        getline(myfile, line);
+        //cout << "line: " << line;
+        iss << line;
+        iss >> AI_noise_min >> AI_noise_max >> AI_noise_factor_min >> AI_noise_factor_max;
         iss.str("");
 
         getline(myfile, line);

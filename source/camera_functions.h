@@ -17,12 +17,16 @@
 #include <sstream>
 
 #include <ASICamera2.h>
+#include <SVBCameraSDK.h>
 
+//#define special_setup_01 0  // special setup without main screen
 
 #define camera_from_file 0  //0 - ASI camera, 1 - image from fits file
-#define stack_from_file  0  //0 - ASI camera or fits file, 1 - stack image from saved tiff file
+#define stack_from_file  0  //0 - ASI camera or fits file, 1 - stack image from saved tiff file, 2 - special mode for dataset generation
 
 #define save_subs  0        //0 - nothing, 1 - save calibrated and registered subs to tiff file
+
+#define NV_mode 0           //special mode for high fps NV mono
 
 
 extern long image_size; // , image_size_v, image_size_f;
@@ -37,10 +41,12 @@ extern int auto_save_pictures_n;
 extern long exposure_time, exposure_time_v, exposure_time_f;
 extern long gain, gain_v, gain_f;
 extern long WB_R, WB_R_v, WB_R_f;
+extern long WB_G, WB_G_v, WB_G_f;
 extern long WB_B, WB_B_v, WB_B_f;
 extern long offset, offset_v, offset_f;
 extern int highspeed_v;
 extern long bandwidth; // , bandwidth_v, bandwidth_f;
+extern float hot_pixel_sigma;
 extern int ROI_zoom;
 extern long monobin; // , monobin_v, monobin_f;
 extern int banding_filter_flag;
@@ -62,13 +68,14 @@ extern int display_height;
 extern int background_comp_flag, noise_reduction_flag;
 extern float filter_strength_1;
 extern float filter_strength_2;
-extern int CLAHE_tiles_size;
-extern float CLAHE_clip_limit;
-extern float CLAHE_amount;
+extern int midtone_radius;
+extern float midtone_width;
+extern float midtone_strength;
 extern float sharpen_sigma;
 extern float sharpen_amount;
 extern float black_level_value_v;
 extern float black_level_value_f;
+extern float black_point_offset;
 extern int circular_mask_background_flag;
 extern float circular_mask_background_size;
 extern int circular_mask_background_show;
@@ -76,7 +83,7 @@ extern int circular_mask_flag;
 extern int enhance_stars_flag;
 extern int star_blob_radius;
 extern float star_blob_strength;
-extern int highlight_protection_flag;
+extern float highlight_protection_par;
 extern float init_gamma;
 extern float star_protection_factor;
 extern float WBcorr_R, WBcorr_G, WBcorr_B;
@@ -89,7 +96,7 @@ extern float CC31, CC32, CC33;
 extern float aR, bR, cR;  //dual band colors for R
 extern float aG, bG, cG;  //dual band colors for G
 extern float aB, bB, cB;  //dual band colors for B
-extern double focusing_zoom_value;
+extern double focusing_zoom_value, zoom_value;
 extern double display_zoom_value, display_zoom_value_stored;
 extern int key_exit;       //(int)'x'   // exit
 extern int key_mode;       //(int)'m'   //mode change foto, video
@@ -100,12 +107,20 @@ extern int key_save_image; //(int)'s'   //save images
 extern int key_focusing;   //(int)'f'   //focusing zoom
 extern int key_histogram;   //(int)'h'   //show histogram
 
+extern int main_display_flag;
 extern int GUI_flag;
+extern int show_clock_flag;
 
 extern float AI_noise_factor;
+extern float AI_noise_min;
+extern float AI_noise_max;
+extern float AI_noise_factor_min;
+extern float AI_noise_factor_max;
 extern int AI_noise_frames;
 extern char AI_noise_model_filename[80];
 extern int AI_num_threads;
+
+extern int main_display_flag;
 
 extern int eyepiece_display_flag;
 extern int eyepiece_display_X_pixels;
@@ -118,6 +133,8 @@ extern int second_display_X;
 extern int second_display_Y;
 extern int circular_mask_eyepiece_flag;
 
+extern bool is_color_cam;
+extern int bayer_pattern;
 
 extern int asi_connected_cameras;
 extern int asi_num_controls;
@@ -126,6 +143,14 @@ extern ASI_CONTROL_CAPS** asi_control_caps;
 extern unsigned char* asi_image;
 //extern ASI_EXPOSURE_STATUS asi_exp_status;
 extern int camera_image_width, camera_image_height;
+
+extern int svb_connected_cameras;
+extern int svb_num_controls;
+extern SVB_CAMERA_INFO** svb_camera_info;
+extern SVB_CAMERA_PROPERTY** svb_camera_property;
+extern SVB_CONTROL_CAPS** svb_control_caps;
+//extern int svb_cameraID_array[20];
+
 
 
 extern int cam;
@@ -160,7 +185,7 @@ void set_camera_controls();
 
 void start_video();
 
-void get_video_frame();
+int get_video_frame();
 
 void stop_video();
 
