@@ -1,4 +1,4 @@
-// Copyright 2025, Andriy Melnykov
+// Copyright 2026, Andriy Melnykov
 // https://github.com/andriymelnykov/Digital_Eyepiece_APP
 // Distributed under the MIT License.
 // (See accompanying LICENSE file or at
@@ -15,23 +15,47 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include <ASICamera2.h>
 #include <SVBCameraSDK.h>
+#include <toupcam.h>
 
-//#define special_setup_01 0  // special setup without main screen
+//#define special_setup_01 0  // special setup without main screen - changed in variable
 
 #define camera_from_file 0  //0 - ASI camera, 1 - image from fits file
 #define stack_from_file  0  //0 - ASI camera or fits file, 1 - stack image from saved tiff file, 2 - special mode for dataset generation
 
 #define save_subs  0        //0 - nothing, 1 - save calibrated and registered subs to tiff file
 
-#define NV_mode 0           //special mode for high fps NV mono
+//#define NV_mode 0           //special mode for high fps NV mono - changed in variable
+
+#define vign_mode 0           //special mode for showing of vigneting as graph
+
+#define meas_mode 0        //special mode for light intensity measurement with camera sensor
+
+#define cdk_mode 1        //special mode for cdk: clock in both displays, no rgb focusing, search for camera name
+
+#define bkg_mode 1        //mode for exchange histogram button with background correction function
+
+#define blkp_mode 1      //mode for black point correction for both monitor and eyepiece
+
+#define spline_gain_corr 1   //additional spline based gain correction after flat
+
+#define roi_zoom 1   // roi 2x zoom active depending on config
+
+#define blur_stack 1   // additional blur of stack to prevent artifacts
+#define blur_stack_sigma 0.4  //0.6
+
+#define use_hotkeys 1
 
 
 extern long image_size; // , image_size_v, image_size_f;
 
 extern std::ofstream logfile;
+
+extern char camera_name_from_file[64];
 
 extern int debug_flag;
 
@@ -48,6 +72,8 @@ extern int highspeed_v;
 extern long bandwidth; // , bandwidth_v, bandwidth_f;
 extern float hot_pixel_sigma;
 extern int ROI_zoom;
+extern int scale_internalimage_height;
+extern int crop_internalimage_flag;
 extern long monobin; // , monobin_v, monobin_f;
 extern int banding_filter_flag;
 extern int banding_filter_strength;
@@ -62,12 +88,25 @@ extern int dark_f_hotpixel_flag, dark_f_subtract_flag;
 extern int add_hotpixel_flag_f;
 extern int flat_v_flag, flat_f_flag;
 extern char dark_v_filename[80], dark_f_filename[80], flat_filename[80];
+extern int spline_corr_flag;
+extern std::vector<float> spline_radius;
+extern std::vector<float> spline_rValues;
+extern std::vector<float> spline_gValues;
+extern std::vector<float> spline_bValues;
 extern float flat_inv_factor;
+extern float circ_vign_factor;
+extern float circ_vign_radius;
+extern float blkp_x1_monitor;
+extern float blkp_y1_monitor;
+extern float blkp_x1_eyepiece;
+extern float blkp_y1_eyepiece;
 extern int cooler_activation;
 extern int display_height;
 extern int background_comp_flag, noise_reduction_flag;
 extern float filter_strength_1;
 extern float filter_strength_2;
+extern float filter_strength_NV_1;
+extern float filter_strength_NV_2;
 extern int midtone_radius;
 extern float midtone_width;
 extern float midtone_strength;
@@ -84,8 +123,14 @@ extern int enhance_stars_flag;
 extern int star_blob_radius;
 extern float star_blob_strength;
 extern float highlight_protection_par;
+extern int reject_satellittes_flag;
+extern float sattellites_decay;
+extern float reject_shaky_factor;
+extern float reject_cloudy_factor;
 extern float init_gamma;
+extern float lum_stretch_factor;
 extern float star_protection_factor;
+extern float star_factor;
 extern float WBcorr_R, WBcorr_G, WBcorr_B;
 
 extern int color_correction_flag;
@@ -96,7 +141,20 @@ extern float CC31, CC32, CC33;
 extern float aR, bR, cR;  //dual band colors for R
 extern float aG, bG, cG;  //dual band colors for G
 extern float aB, bB, cB;  //dual band colors for B
+
+struct ColorPaletteConfig {
+    std::string name;
+    float lum_stretch_factor;
+    float WB_R, WB_G, WB_B;
+    float CC11, CC12, CC13;
+    float CC21, CC22, CC23;
+    float CC31, CC32, CC33;
+};
+
+extern std::vector<ColorPaletteConfig> color_palettes;
+
 extern double focusing_zoom_value, zoom_value;
+extern int focusing_zoom_type;
 extern double display_zoom_value, display_zoom_value_stored;
 extern int key_exit;       //(int)'x'   // exit
 extern int key_mode;       //(int)'m'   //mode change foto, video
@@ -110,6 +168,7 @@ extern int key_histogram;   //(int)'h'   //show histogram
 extern int main_display_flag;
 extern int GUI_flag;
 extern int show_clock_flag;
+extern int show_status_flag;
 
 extern float AI_noise_factor;
 extern float AI_noise_min;
@@ -119,6 +178,11 @@ extern float AI_noise_factor_max;
 extern int AI_noise_frames;
 extern char AI_noise_model_filename[80];
 extern int AI_num_threads;
+
+extern char AI_noise_model_NV_filename[80];
+extern float AI_noise_factor_NV_1, AI_noise_factor_NV_2;
+extern float motion_gain_reduction;
+extern int motion_number_frames;
 
 extern int main_display_flag;
 
@@ -132,6 +196,13 @@ extern int eyepiece_display_rotation;
 extern int second_display_X;
 extern int second_display_Y;
 extern int circular_mask_eyepiece_flag;
+
+extern int NV_mode;
+extern int average_type;
+extern float kalman_alfa;
+extern float kalman_beta;
+extern float threshold_low;
+extern float threshold_high;
 
 extern bool is_color_cam;
 extern int bayer_pattern;
@@ -151,6 +222,12 @@ extern SVB_CAMERA_PROPERTY** svb_camera_property;
 extern SVB_CONTROL_CAPS** svb_control_caps;
 //extern int svb_cameraID_array[20];
 
+extern int toup_connected_cameras;
+extern ToupcamDeviceV2 toup_camera_info[TOUPCAM_MAX];
+extern unsigned toup_raw_fourcc;
+extern unsigned toup_bits_per_pixel;
+extern HToupcam toup_handle;
+
 
 
 extern int cam;
@@ -161,15 +238,12 @@ extern int ROI_zoom_k;
 extern int state;
 extern int old_state;
 extern int frames_stacked; // number of stacked frames in foto mode
+extern int color_palette;
 
 
 #define video_state 0 //video state for state machine
 #define foto_state  1  //long exposure state for state machine
-/*
-#define palette_rgb 0 //for color palettes in foto mode
-#define palette_duo 1
-#define palette_halpha 2
-/**/
+
 
 void abort_app();
 
@@ -194,6 +268,8 @@ void start_exposure();
 void stop_exposure();
 
 int exposure_status();
+
+bool get_sensor_temperature(double& temperature_c);
 
 void get_foto_frame();
 
